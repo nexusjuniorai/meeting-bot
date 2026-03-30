@@ -71,10 +71,7 @@ export class GoogleMeetBot extends MeetBotBase {
     this.page = await createBrowserContext(url, this._correlationId, 'google');
 
     this._logger.info('Navigating to Google Meet URL...');
-    await this.page.goto(url, { waitUntil: 'networkidle' });
-
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
     const dismissDeviceCheck = async () => {
       try {
@@ -146,14 +143,8 @@ export class GoogleMeetBot extends MeetBotBase {
       }
     );
     
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
-
     this._logger.info('Filling the input field with the name...');
     await this.page.fill('input[type="text"][aria-label="Your name"]', name ? name : 'ScreenApp Notetaker');
-
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
     
     await retryActionWithWait(
       'Clicking the "Ask to join" button',
@@ -473,11 +464,61 @@ export class GoogleMeetBot extends MeetBotBase {
       this._logger.info('Error checking/dismissing device notifications...', { error });
     }
 
+    // Enable closed captions before recording
+    await this.enableCaptions();
+    await this.page.waitForTimeout(1000); // Give CC container time to appear
+
     // Recording the meeting page
     this._logger.info('Begin recording...');
     await this.recordMeetingPage({ teamId, eventId, userId, botId, uploader });
 
     pushState('finished');
+  }
+
+  private async enableCaptions(): Promise<void> {
+    this._logger.info('Attempting to enable closed captions...');
+    try {
+      // Strategy 1: Direct CC button click
+      const ccButton = this.page.locator('button[aria-label="Turn on captions"]');
+      if (await ccButton.count() > 0) {
+        await ccButton.click({ timeout: 5000 });
+        this._logger.info('Captions enabled via direct CC button');
+        return;
+      }
+    } catch (err) {
+      this._logger.info('Direct CC button not found, trying alternatives...');
+    }
+
+    try {
+      // Strategy 2: Look for CC button by jsname
+      const ccByJsname = this.page.locator('button[jsname="r8qRAd"]');
+      if (await ccByJsname.count() > 0) {
+        await ccByJsname.click({ timeout: 5000 });
+        this._logger.info('Captions enabled via jsname button');
+        return;
+      }
+    } catch (err) {
+      this._logger.info('CC jsname button not found, trying More Options...');
+    }
+
+    try {
+      // Strategy 3: More Options menu → Turn on captions
+      const moreOptions = this.page.locator('button[aria-label="More options"]');
+      if (await moreOptions.count() > 0) {
+        await moreOptions.click({ timeout: 5000 });
+        await this.page.waitForTimeout(500);
+        const captionsMenuItem = this.page.locator('li[aria-label*="captions"], span:has-text("Turn on captions")').first();
+        if (await captionsMenuItem.count() > 0) {
+          await captionsMenuItem.click({ timeout: 5000 });
+          this._logger.info('Captions enabled via More Options menu');
+          return;
+        }
+      }
+    } catch (err) {
+      this._logger.warn('Could not enable captions via More Options menu');
+    }
+
+    this._logger.warn('Failed to enable captions — all strategies exhausted. Caption scraper will capture nothing.');
   }
 
   private async recordMeetingPage(
@@ -510,6 +551,32 @@ export class GoogleMeetBot extends MeetBotBase {
         waitingPromise.resolveEarly();
       } catch (error) {
         console.error('Could not process meeting end event', error);
+      }
+    });
+
+    // Caption and participant tracking arrays (populated from browser context)
+    const captions: Array<{ speaker: string; text: string; ts: number }> = [];
+    const participantEvents: Array<{ name: string; action: 'join' | 'leave'; ts: number }> = [];
+
+    await this.page.exposeFunction('screenAppSendCaption', (raw: string) => {
+      try {
+        const entries = JSON.parse(raw);
+        if (Array.isArray(entries)) {
+          captions.push(...entries);
+        }
+      } catch (err) {
+        this._logger.warn('Failed to parse caption data', { error: err });
+      }
+    });
+
+    await this.page.exposeFunction('screenAppSendParticipant', (raw: string) => {
+      try {
+        const entries = JSON.parse(raw);
+        if (Array.isArray(entries)) {
+          participantEvents.push(...entries);
+        }
+      } catch (err) {
+        this._logger.warn('Failed to parse participant data', { error: err });
       }
     });
 
@@ -1002,6 +1069,153 @@ export class GoogleMeetBot extends MeetBotBase {
 
           detectModalsAndDismiss();
 
+          // Caption scraper — observes the CC container for new caption segments
+          const startCaptionScraper = () => {
+            try {
+              const findCaptionContainer = (): Element | null => {
+                // Primary: jsname-based selector (most stable across Google UI updates)
+                let container = document.querySelector('[jsname="YSxPC"]');
+                if (container) return container;
+                // Fallback: aria-live region used for captions
+                container = document.querySelector('[aria-live="polite"][role="region"]');
+                if (container) return container;
+                // Fallback: data-is-persistent-banner containers
+                container = document.querySelector('[data-is-persistent-banner]');
+                return container;
+              };
+
+              const container = findCaptionContainer();
+              if (!container) {
+                console.warn('Caption container not found — CC may not be enabled or selectors have changed');
+                return;
+              }
+
+              console.log('Caption scraper attached to container');
+              const seenTexts = new Set<string>();
+
+              const observer = new MutationObserver(() => {
+                try {
+                  // Find all caption line elements
+                  const lines = container.querySelectorAll('[jsname="YSxPC"] > div, [data-speaker-id]');
+                  const batch: Array<{ speaker: string; text: string; ts: number }> = [];
+
+                  if (lines.length === 0) {
+                    // Fallback: read all child divs
+                    const childDivs = container.querySelectorAll('div');
+                    childDivs.forEach((div) => {
+                      const text = (div as HTMLElement).innerText?.trim();
+                      if (text && text.length > 3 && !seenTexts.has(text)) {
+                        seenTexts.add(text);
+                        batch.push({ speaker: 'Unknown', text, ts: Date.now() });
+                      }
+                    });
+                  } else {
+                    lines.forEach((line) => {
+                      // Speaker name element
+                      const speakerEl = line.querySelector('[jsname="bkEvMb"]') ||
+                                        line.querySelector('[data-speaker-id]');
+                      const speaker = speakerEl
+                        ? (speakerEl as HTMLElement).innerText?.trim() || 'Unknown'
+                        : 'Unknown';
+
+                      // Caption text — usually the last text node or span
+                      const spans = line.querySelectorAll('span');
+                      let text = '';
+                      if (spans.length > 0) {
+                        text = Array.from(spans)
+                          .map((s) => (s as HTMLElement).innerText?.trim())
+                          .filter(Boolean)
+                          .join(' ');
+                      } else {
+                        text = (line as HTMLElement).innerText?.trim() || '';
+                      }
+
+                      if (text && !seenTexts.has(`${speaker}:${text}`)) {
+                        seenTexts.add(`${speaker}:${text}`);
+                        batch.push({ speaker, text, ts: Date.now() });
+                      }
+                    });
+                  }
+
+                  if (batch.length > 0) {
+                    (window as any).screenAppSendCaption(JSON.stringify(batch));
+                  }
+                } catch (err) {
+                  console.error('Caption scraper mutation error:', err);
+                }
+              });
+
+              observer.observe(container, { childList: true, subtree: true, characterData: true });
+            } catch (err) {
+              console.error('Failed to start caption scraper:', err);
+            }
+          };
+
+          // Participant tracker — polls the People panel for join/leave events
+          const startParticipantTracker = () => {
+            const knownParticipants = new Set<string>();
+            let trackerInterval: ReturnType<typeof setInterval>;
+
+            const pollParticipants = () => {
+              try {
+                // Try to read participant names from the People panel (if open)
+                // or from participant avatars/labels in the call view
+                const names = new Set<string>();
+
+                // Method 1: People panel list items
+                const listItems = document.querySelectorAll('[data-participant-id], [data-requested-participant-id]');
+                listItems.forEach((item) => {
+                  const name = (item as HTMLElement).innerText?.trim()?.split('\\n')[0];
+                  if (name && name.length > 0 && name.length < 100) {
+                    names.add(name);
+                  }
+                });
+
+                // Method 2: Participant name labels visible in the call grid
+                if (names.size === 0) {
+                  const nameLabels = document.querySelectorAll('[data-self-name], [jsname="nZvhOc"]');
+                  nameLabels.forEach((label) => {
+                    const name = (label as HTMLElement).innerText?.trim();
+                    if (name && name.length > 0 && name.length < 100) {
+                      names.add(name);
+                    }
+                  });
+                }
+
+                const batch: Array<{ name: string; action: 'join' | 'leave'; ts: number }> = [];
+
+                // Detect joins
+                names.forEach((name) => {
+                  if (!knownParticipants.has(name)) {
+                    knownParticipants.add(name);
+                    batch.push({ name, action: 'join', ts: Date.now() });
+                  }
+                });
+
+                // Detect leaves
+                knownParticipants.forEach((name) => {
+                  if (!names.has(name)) {
+                    knownParticipants.delete(name);
+                    batch.push({ name, action: 'leave', ts: Date.now() });
+                  }
+                });
+
+                if (batch.length > 0) {
+                  (window as any).screenAppSendParticipant(JSON.stringify(batch));
+                }
+              } catch (err) {
+                console.error('Participant tracker error:', err);
+              }
+            };
+
+            trackerInterval = setInterval(pollParticipants, 4000);
+            // Initial poll
+            pollParticipants();
+          };
+
+          startCaptionScraper();
+          startParticipantTracker();
+
           detectMeetingIsOnAValidPage();
           
           // Cancel this timeout when stopping the recording
@@ -1035,9 +1249,28 @@ export class GoogleMeetBot extends MeetBotBase {
       this._logger.info('Closing the browser...');
       await this.page.context().browser()?.close();
 
+      // Attach captured captions and participant events to the uploader
+      if (typeof (uploader as any).setMeetingMetadata === 'function') {
+        (uploader as any).setMeetingMetadata({ captions, participants: participantEvents });
+      }
+
       this._logger.info('All done ✨', { eventId, botId, userId, teamId });
     });
 
     await waitingPromise.promise;
+
+    if (captions.length === 0) {
+      this._logger.warn(
+        'No captions were captured for this meeting. ' +
+        'Google Meet CC selectors may have changed. ' +
+        'Check startCaptionScraper() in GoogleMeetBot.ts.',
+        { botId, userId, teamId }
+      );
+    }
+    this._logger.info('Meeting ended', {
+      captureCount: captions.length,
+      participantEventCount: participantEvents.length,
+      botId,
+    });
   }
 }

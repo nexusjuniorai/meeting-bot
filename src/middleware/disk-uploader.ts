@@ -45,6 +45,7 @@ function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean 
 export interface IUploader {
   uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<boolean>;
   saveDataToTempFile(data: Buffer): Promise<boolean>;
+  setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void;
 }
 
 // Save to disk and upload in one session
@@ -59,6 +60,7 @@ class DiskUploader implements IUploader {
   private _tempFileId: string;
   private _logger: Logger;
   private _meetingLink?: string;
+  private _meetingMetadata: { captions: any[]; participants: any[] } = { captions: [], participants: [] };
 
   private readonly UPLOAD_CHUNK_SIZE = 50 * 1024 * 1024; // 50 MiB
 
@@ -295,6 +297,10 @@ class DiskUploader implements IUploader {
           throw err;
         });
     }
+  }
+
+  public setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void {
+    this._meetingMetadata = meta;
   }
 
   public async saveDataToTempFile(data: Buffer) {
@@ -658,6 +664,8 @@ class DiskUploader implements IUploader {
               botId: this._botId,
               contentType: this.contentType,
               uploaderType: config.uploaderType,
+              participants: this._meetingMetadata.participants,
+              captions: this._meetingMetadata.captions,
             },
           };
           await notifyRecordingCompleted(payload, this._logger);
