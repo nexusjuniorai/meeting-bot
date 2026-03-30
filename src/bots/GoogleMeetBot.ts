@@ -68,30 +68,39 @@ export class GoogleMeetBot extends MeetBotBase {
   private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this._logger.info('Launching browser...');
 
-    this.page = await createBrowserContext(url, this._correlationId, 'google');
+    const isSignedIn = !!config.googleBotAuthState;
+
+    this.page = await createBrowserContext(url, this._correlationId, 'google',
+      isSignedIn ? { storageStateB64: config.googleBotAuthState } : undefined
+    );
 
     this._logger.info('Navigating to Google Meet URL...');
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
-    const dismissDeviceCheck = async () => {
-      try {
-        this._logger.info('Clicking Continue without microphone and camera button...');
-        await retryActionWithWait(
-          'Clicking the "Continue without microphone and camera" button',
-          async () => {
-            await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).waitFor({ timeout: 30000 });
-            await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).click();
-          },
-          this._logger,
-          1,
-          15000,
-        );
-      } catch (dismissError) {
-        this._logger.info('Continue without microphone and camera button is probably missing!...');
-      }
-    };
+    if (!isSignedIn) {
+      // Guest flow: dismiss device check and fill name input
+      const dismissDeviceCheck = async () => {
+        try {
+          this._logger.info('Clicking Continue without microphone and camera button...');
+          await retryActionWithWait(
+            'Clicking the "Continue without microphone and camera" button',
+            async () => {
+              await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).waitFor({ timeout: 30000 });
+              await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).click();
+            },
+            this._logger,
+            1,
+            15000,
+          );
+        } catch (dismissError) {
+          this._logger.info('Continue without microphone and camera button is probably missing!...');
+        }
+      };
 
-    await dismissDeviceCheck();
+      await dismissDeviceCheck();
+    } else {
+      this._logger.info('Bot is signed in with Google account — skipping device check dialog');
+    }
 
     const verifyItIsOnGoogleMeetPage = async (): Promise<'SIGN_IN_PAGE' | 'GOOGLE_MEET_PAGE' | 'UNSUPPORTED_PAGE' | null> => {
       try {
@@ -123,6 +132,10 @@ export class GoogleMeetBot extends MeetBotBase {
 
     const googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
     if (googleMeetPageStatus === 'SIGN_IN_PAGE') {
+      if (isSignedIn) {
+        // Session may have expired — log but continue to try
+        this._logger.warn('Signed-in bot was redirected to sign-in page — auth state may be expired', { userId, teamId });
+      }
       this._logger.info('Exiting now as meeting requires sign in...', { googleMeetPageStatus, userId, teamId });
       throw new UnsupportedMeetingError('Meeting requires sign in', googleMeetPageStatus);
     }
@@ -131,20 +144,51 @@ export class GoogleMeetBot extends MeetBotBase {
       this._logger.info('Google Meet bot is on the unsupported page...', { googleMeetPageStatus, userId, teamId });
     }
 
-    this._logger.info('Waiting for the input field to be visible...');
-    await retryActionWithWait(
-      'Waiting for the input field',
-      async () => await this.page.waitForSelector('input[type="text"][aria-label="Your name"]', { timeout: 10000 }),
-      this._logger,
-      3,
-      15000,
-      async () => {
-        await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'text-input-field-wait', userId, this._logger, botId);
-      }
-    );
-    
-    this._logger.info('Filling the input field with the name...');
-    await this.page.fill('input[type="text"][aria-label="Your name"]', name ? name : 'ScreenApp Notetaker');
+    if (!isSignedIn) {
+      // Guest flow: fill name input
+      this._logger.info('Waiting for the input field to be visible...');
+      await retryActionWithWait(
+        'Waiting for the input field',
+        async () => await this.page.waitForSelector('input[type="text"][aria-label="Your name"]', { timeout: 10000 }),
+        this._logger,
+        3,
+        15000,
+        async () => {
+          await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'text-input-field-wait', userId, this._logger, botId);
+        }
+      );
+
+      this._logger.info('Filling the input field with the name...');
+      await this.page.fill('input[type="text"][aria-label="Your name"]', name ? name : 'ScreenApp Notetaker');
+    } else {
+      // Signed-in flow: Google account name + avatar are used automatically.
+      // Wait briefly for the pre-join screen to render.
+      this._logger.info('Signed-in mode — using Google account profile name and avatar');
+      await this.page.waitForTimeout(2000);
+
+      // Turn off mic and camera on the pre-join screen if toggles are present
+      try {
+        const micButton = this.page.locator('button[aria-label*="microphone"], button[data-is-muted]').first();
+        if (await micButton.count() > 0) {
+          const ariaLabel = await micButton.getAttribute('aria-label');
+          if (ariaLabel && !ariaLabel.toLowerCase().includes('unmute')) {
+            await micButton.click({ timeout: 3000 });
+            this._logger.info('Muted microphone on pre-join screen');
+          }
+        }
+      } catch { /* mic toggle not found — ok */ }
+
+      try {
+        const camButton = this.page.locator('button[aria-label*="camera"]').first();
+        if (await camButton.count() > 0) {
+          const ariaLabel = await camButton.getAttribute('aria-label');
+          if (ariaLabel && !ariaLabel.toLowerCase().includes('turn on')) {
+            await camButton.click({ timeout: 3000 });
+            this._logger.info('Turned off camera on pre-join screen');
+          }
+        }
+      } catch { /* camera toggle not found — ok */ }
+    }
     
     await retryActionWithWait(
       'Clicking the "Ask to join" button',

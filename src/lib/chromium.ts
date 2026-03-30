@@ -65,7 +65,12 @@ async function launchBrowserWithTimeout(launchFn: () => Promise<Browser>, timeou
   });
 }
 
-async function createBrowserContext(url: string, correlationId: string, botType: BotType = 'google'): Promise<Page> {
+export interface BrowserContextOptions {
+  /** Base64-encoded Playwright storageState JSON */
+  storageStateB64?: string;
+}
+
+async function createBrowserContext(url: string, correlationId: string, botType: BotType = 'google', options?: BrowserContextOptions): Promise<Page> {
   const size = { width: 1280, height: 720 };
 
   // Base browser args used by all bots
@@ -137,12 +142,25 @@ async function createBrowserContext(url: string, correlationId: string, botType:
   );
 
   const linuxX11UserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
-  
+
+  // Decode base64 storageState if provided (signs in the bot with a Google account)
+  let storageState: { cookies: any[]; origins: any[] } | undefined;
+  if (options?.storageStateB64) {
+    try {
+      const json = Buffer.from(options.storageStateB64, 'base64').toString('utf-8');
+      storageState = JSON.parse(json);
+      console.log(`${getCorrelationIdLog(correlationId)} Loaded storageState from GOOGLE_BOT_AUTH_STATE (${options.storageStateB64.length} chars base64)`);
+    } catch (err) {
+      console.error(`${getCorrelationIdLog(correlationId)} Failed to decode GOOGLE_BOT_AUTH_STATE — bot will join as guest`, err);
+    }
+  }
+
   const context = await browser.newContext({
     permissions: ['camera', 'microphone'],
     viewport: size,
     ignoreHTTPSErrors: true,
     userAgent: linuxX11UserAgent,
+    ...(storageState && { storageState }),
     // Record video only in development for debugging
     ...(process.env.NODE_ENV === 'development' && {
       recordVideo: {

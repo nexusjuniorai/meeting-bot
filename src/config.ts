@@ -106,4 +106,9 @@ export default {
     uploadConcurrency: process.env.AZURE_UPLOAD_CONCURRENCY ? Number(process.env.AZURE_UPLOAD_CONCURRENCY) : 4,
   },
   uploaderType: process.env.UPLOADER_TYPE ? (process.env.UPLOADER_TYPE as UploaderType) : 's3' as UploaderType,
+  // Base64-encoded Playwright storageState JSON for Google Meet bot sign-in.
+  // When set, the bot joins as a signed-in Google account (with profile picture).
+  // Generate: npx playwright codegen --save-storage=google-auth.json https://accounts.google.com
+  // Then encode: base64 -i google-auth.json (macOS) or base64 google-auth.json (Linux)
+  googleBotAuthState: process.env.GOOGLE_BOT_AUTH_STATE || '',
 };
