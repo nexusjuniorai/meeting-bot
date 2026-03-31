@@ -20,7 +20,8 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
     timezone,
     userId,
     eventId,
-    botId
+    botId,
+    avatarUrl,
   }: MeetingJoinParams = req.body;
 
   // Validate required fields
@@ -65,7 +66,7 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
 
       // Create and join the meeting
       const bot = new GoogleMeetBot(logger, correlationId);
-      await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader });
+      await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader, avatarUrl });
     }, logger);
 
     if (!jobResult.accepted) {

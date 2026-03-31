@@ -65,39 +65,58 @@ export class GoogleMeetBot extends MeetBotBase {
     }
   }
 
-  private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
+  private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader, avatarUrl }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this._logger.info('Launching browser...');
 
     const isSignedIn = !!config.googleBotAuthState;
 
     this.page = await createBrowserContext(url, this._correlationId, 'google',
-      isSignedIn ? { storageStateB64: config.googleBotAuthState } : undefined
+      isSignedIn
+        ? { storageStateB64: config.googleBotAuthState }
+        : (avatarUrl ? { avatarUrl } : undefined)
     );
 
     this._logger.info('Navigating to Google Meet URL...');
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
     if (!isSignedIn) {
-      // Guest flow: dismiss device check and fill name input
-      const dismissDeviceCheck = async () => {
-        try {
-          this._logger.info('Clicking Continue without microphone and camera button...');
-          await retryActionWithWait(
-            'Clicking the "Continue without microphone and camera" button',
-            async () => {
-              await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).waitFor({ timeout: 30000 });
-              await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).click();
-            },
-            this._logger,
-            1,
-            15000,
-          );
-        } catch (dismissError) {
-          this._logger.info('Continue without microphone and camera button is probably missing!...');
-        }
-      };
+      if (!avatarUrl) {
+        // Guest flow (no avatar): dismiss device check to skip camera/mic setup
+        const dismissDeviceCheck = async () => {
+          try {
+            this._logger.info('Clicking Continue without microphone and camera button...');
+            await retryActionWithWait(
+              'Clicking the "Continue without microphone and camera" button',
+              async () => {
+                await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).waitFor({ timeout: 30000 });
+                await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).click();
+              },
+              this._logger,
+              1,
+              15000,
+            );
+          } catch (dismissError) {
+            this._logger.info('Continue without microphone and camera button is probably missing!...');
+          }
+        };
 
-      await dismissDeviceCheck();
+        await dismissDeviceCheck();
+      } else {
+        // Guest flow with avatar: let the camera load (canvas stream), mute mic only
+        this._logger.info('Avatar mode — skipping device check, keeping camera on with virtual stream');
+        await this.page.waitForTimeout(2000);
+
+        try {
+          const micButton = this.page.locator('button[aria-label*="microphone"], button[data-is-muted]').first();
+          if (await micButton.count() > 0) {
+            const ariaLabel = await micButton.getAttribute('aria-label');
+            if (ariaLabel && !ariaLabel.toLowerCase().includes('unmute')) {
+              await micButton.click({ timeout: 3000 });
+              this._logger.info('Muted microphone on pre-join screen');
+            }
+          }
+        } catch { /* mic toggle not found — ok */ }
+      }
     } else {
       this._logger.info('Bot is signed in with Google account — skipping device check dialog');
     }
