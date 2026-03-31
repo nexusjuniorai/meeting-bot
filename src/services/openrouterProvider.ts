@@ -15,12 +15,16 @@ function buildPrompt(participantNames: string[], language: string): string {
     ? `The known meeting participants are: ${participantNames.join(', ')}.`
     : 'The participant names are unknown.';
 
+  const languageInstruction = language === 'auto'
+    ? 'Detect the language spoken and transcribe every spoken word accurately in that language. Do NOT translate.'
+    : `Transcribe every spoken word accurately in the original language (${language}). Do NOT translate.`;
+
   return `You are a meeting transcription assistant. Your task is to transcribe the audio recording and identify each speaker.
 
 ${nameList}
 
 Instructions:
-- Transcribe every spoken word accurately in the original language (${language}). Do NOT translate.
+- ${languageInstruction}
 - Identify each distinct speaker by their voice and assign them a name from the participant list above.
 - If a speaker cannot be matched to a known name, label them "Speaker 1", "Speaker 2", etc.
 - Group consecutive speech from the same speaker into a single segment.

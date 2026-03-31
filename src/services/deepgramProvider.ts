@@ -89,7 +89,7 @@ export async function transcribeWithDeepgram(
 
   const params = new URLSearchParams({
     model,
-    language,
+    ...(language === 'auto' ? { detect_language: 'true' } : { language }),
     diarize: 'true',
     utterances: 'true',
     punctuate: 'true',

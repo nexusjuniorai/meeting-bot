@@ -110,7 +110,7 @@ export default {
   transcriptionEnabled: process.env.TRANSCRIPTION_ENABLED === 'true',
   transcriptionProvider: process.env.TRANSCRIPTION_PROVIDER || 'openrouter',
   transcriptionApiKey: process.env.TRANSCRIPTION_API_KEY,
-  transcriptionLanguage: process.env.TRANSCRIPTION_LANGUAGE || 'pt-BR',
+  transcriptionLanguage: process.env.TRANSCRIPTION_LANGUAGE || 'auto',
   transcriptionModel: process.env.TRANSCRIPTION_MODEL || 'google/gemini-2.5-flash',
   transcriptionTimeoutMs: process.env.TRANSCRIPTION_TIMEOUT_MS
     ? Number(process.env.TRANSCRIPTION_TIMEOUT_MS)
