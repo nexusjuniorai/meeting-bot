@@ -150,7 +150,7 @@ export class GoogleMeetBot extends MeetBotBase {
   private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this._logger.info('Launching browser...');
 
-    const isSignedIn = !!config.googleBotAuthState;
+    let isSignedIn = !!config.googleBotAuthState;
 
     this.page = await createBrowserContext(url, this._correlationId, 'google',
       isSignedIn ? { storageStateB64: config.googleBotAuthState } : undefined
@@ -212,12 +212,43 @@ export class GoogleMeetBot extends MeetBotBase {
       }
     };
 
-    const googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
-    if (googleMeetPageStatus === 'SIGN_IN_PAGE') {
-      if (isSignedIn) {
-        // Session may have expired — log but continue to try
-        this._logger.warn('Signed-in bot was redirected to sign-in page — auth state may be expired', { userId, teamId });
+    let googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
+
+    // --- Signed-in bot landed on accounts.google.com — try to navigate through, then fall back to guest ---
+    if (googleMeetPageStatus === 'SIGN_IN_PAGE' && isSignedIn) {
+      this._logger.warn('Signed-in bot redirected to Google account page — attempting account flow', { userId, teamId });
+      try {
+        await this.navigateGoogleAccountFlow(url, userId, teamId);
+      } catch(e) {
+        this._logger.warn('Account flow navigation failed', { error: e, userId, teamId });
       }
+
+      // Re-check after account flow
+      googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
+
+      if (googleMeetPageStatus !== 'GOOGLE_MEET_PAGE') {
+        // Auth is truly expired — clear cookies and retry as guest
+        this._logger.warn('Auth state expired — clearing cookies and falling back to guest mode', { userId, teamId });
+        await this.page.context().clearCookies();
+        await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+        isSignedIn = false;
+
+        // Guest flow: dismiss device check
+        try {
+          await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).waitFor({ timeout: 15000 });
+          await this.page.getByRole('button', { name: 'Continue without microphone and camera' }).click();
+          this._logger.info('Dismissed device check dialog (guest fallback)');
+        } catch { /* may be missing */ }
+
+        // Final verify — if meeting truly requires sign-in, we can't join
+        googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
+        if (googleMeetPageStatus !== 'GOOGLE_MEET_PAGE') {
+          this._logger.info('Meeting requires sign in even for guests — cannot join', { googleMeetPageStatus, userId, teamId });
+          throw new UnsupportedMeetingError('Meeting requires sign in', googleMeetPageStatus);
+        }
+      }
+    } else if (googleMeetPageStatus === 'SIGN_IN_PAGE') {
+      // Guest bot on sign-in page — meeting requires auth, can't join
       this._logger.info('Exiting now as meeting requires sign in...', { googleMeetPageStatus, userId, teamId });
       throw new UnsupportedMeetingError('Meeting requires sign in', googleMeetPageStatus);
     }
