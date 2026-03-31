@@ -14,6 +14,9 @@ import { uploadDebugImage } from '../services/bugService';
 import createBrowserContext from '../lib/chromium';
 import { GOOGLE_LOBBY_MODE_HOST_TEXT, GOOGLE_REQUEST_DENIED, GOOGLE_REQUEST_TIMEOUT } from '../constants';
 import { vp9MimeType, webmMimeType } from '../lib/recording';
+import { PulseAudioRecorder } from '../lib/pulseAudioRecorder';
+import * as path from 'path';
+import * as fs from 'fs';
 
 export class GoogleMeetBot extends MeetBotBase {
   private _logger: Logger;
@@ -521,45 +524,89 @@ export class GoogleMeetBot extends MeetBotBase {
 
   private async enableCaptions(): Promise<void> {
     this._logger.info('Attempting to enable closed captions...');
+
+    // Strategy 1: aria-label based (most stable across UI updates)
     try {
-      // Strategy 1: Direct CC button click
       const ccButton = this.page.locator('button[aria-label="Turn on captions"]');
       if (await ccButton.count() > 0) {
         await ccButton.click({ timeout: 5000 });
-        this._logger.info('Captions enabled via direct CC button');
+        this._logger.info('Captions enabled via aria-label button');
         return;
       }
     } catch (err) {
-      this._logger.info('Direct CC button not found, trying alternatives...');
+      this._logger.info('CC aria-label button not found, trying alternatives...');
     }
 
+    // Strategy 2: Keyboard shortcut (works regardless of UI changes)
     try {
-      // Strategy 2: Look for CC button by jsname
-      const ccByJsname = this.page.locator('button[jsname="r8qRAd"]');
-      if (await ccByJsname.count() > 0) {
-        await ccByJsname.click({ timeout: 5000 });
-        this._logger.info('Captions enabled via jsname button');
+      this._logger.info('Trying keyboard shortcut to enable captions (c key)...');
+      await this.page.keyboard.press('c');
+      await this.page.waitForTimeout(1000);
+      // Verify captions appeared by looking for any caption-like container
+      const hasCaptions = await this.page.evaluate(() => {
+        return !!(
+          document.querySelector('[aria-live="polite"][role="region"]') ||
+          document.querySelector('[data-is-persistent-banner]') ||
+          document.querySelector('div[jsname="YSxPC"]') ||
+          // Look for any element with caption-related attributes
+          document.querySelector('[aria-label*="caption" i]') ||
+          document.querySelector('[aria-label="Turn off captions"]')
+        );
+      });
+      if (hasCaptions) {
+        this._logger.info('Captions enabled via keyboard shortcut');
         return;
       }
     } catch (err) {
-      this._logger.info('CC jsname button not found, trying More Options...');
+      this._logger.info('Keyboard shortcut for captions did not work...');
     }
 
+    // Strategy 3: More Options menu → captions toggle
     try {
-      // Strategy 3: More Options menu → Turn on captions
       const moreOptions = this.page.locator('button[aria-label="More options"]');
       if (await moreOptions.count() > 0) {
         await moreOptions.click({ timeout: 5000 });
         await this.page.waitForTimeout(500);
-        const captionsMenuItem = this.page.locator('li[aria-label*="captions"], span:has-text("Turn on captions")').first();
+        // Try multiple selectors for the captions menu item
+        const captionsMenuItem = this.page.locator([
+          'li[aria-label*="captions" i]',
+          'span:has-text("Turn on captions")',
+          'span:has-text("Captions")',
+          '[role="menuitem"]:has-text("captions")',
+        ].join(', ')).first();
         if (await captionsMenuItem.count() > 0) {
           await captionsMenuItem.click({ timeout: 5000 });
           this._logger.info('Captions enabled via More Options menu');
           return;
         }
+        // Close the menu if we couldn't find the item
+        await this.page.keyboard.press('Escape');
       }
     } catch (err) {
       this._logger.warn('Could not enable captions via More Options menu');
+    }
+
+    // Strategy 4: Brute-force search for any CC/captions button
+    try {
+      const found = await this.page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        for (const btn of buttons) {
+          const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+          const text = (btn.textContent || '').toLowerCase();
+          if ((label.includes('caption') || text.includes('caption')) &&
+              !label.includes('turn off') && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (found) {
+        this._logger.info('Captions enabled via brute-force button search');
+        return;
+      }
+    } catch (err) {
+      this._logger.warn('Brute-force caption button search failed');
     }
 
     this._logger.warn('Failed to enable captions — all strategies exhausted. Caption scraper will capture nothing.');
@@ -597,6 +644,18 @@ export class GoogleMeetBot extends MeetBotBase {
         console.error('Could not process meeting end event', error);
       }
     });
+
+    // Start PulseAudio audio recorder (captures WebRTC audio that getDisplayMedia misses)
+    let pulseAudioRecorder: PulseAudioRecorder | null = null;
+    const audioRecordingPath = path.join(process.cwd(), 'dist', '_tempvideo', userId, `${botId || 'audio'}_pulse_audio.mp3`);
+    try {
+      await fs.promises.mkdir(path.dirname(audioRecordingPath), { recursive: true });
+      pulseAudioRecorder = new PulseAudioRecorder(audioRecordingPath, this._logger);
+      await pulseAudioRecorder.start();
+    } catch (err) {
+      this._logger.warn('PulseAudio recorder failed to start — will fall back to extracting audio from video', { error: (err as Error)?.message });
+      pulseAudioRecorder = null;
+    }
 
     // Caption and participant tracking arrays (populated from browser context)
     const captions: Array<{ speaker: string; text: string; ts: number }> = [];
@@ -1115,65 +1174,113 @@ export class GoogleMeetBot extends MeetBotBase {
 
           detectModalsAndDismiss();
 
-          // Caption scraper — observes the CC container for new caption segments
+          // Caption scraper — observes the CC container for new caption segments.
+          // Uses a polling approach to find the container (it may appear after CC is enabled).
           const startCaptionScraper = () => {
-            try {
-              const findCaptionContainer = (): Element | null => {
-                // Primary: jsname-based selector (most stable across Google UI updates)
-                let container = document.querySelector('[jsname="YSxPC"]');
-                if (container) return container;
-                // Fallback: aria-live region used for captions
-                container = document.querySelector('[aria-live="polite"][role="region"]');
-                if (container) return container;
-                // Fallback: data-is-persistent-banner containers
-                container = document.querySelector('[data-is-persistent-banner]');
-                return container;
-              };
+            let retryCount = 0;
+            const maxRetries = 15; // Try for ~30 seconds
+            let scraperAttached = false;
 
-              const container = findCaptionContainer();
-              if (!container) {
-                console.warn('Caption container not found — CC may not be enabled or selectors have changed');
-                return;
+            const findCaptionContainer = (): Element | null => {
+              // Strategy 1: aria-live polite region (ARIA standard — most resilient)
+              let container = document.querySelector('[aria-live="polite"][role="region"]');
+              if (container) { console.log('Caption container found via aria-live region'); return container; }
+
+              // Strategy 2: data-is-persistent-banner (Google Meet banner area)
+              container = document.querySelector('[data-is-persistent-banner]');
+              if (container) { console.log('Caption container found via persistent-banner'); return container; }
+
+              // Strategy 3: jsname-based (may break with Google UI updates)
+              container = document.querySelector('[jsname="YSxPC"]');
+              if (container) { console.log('Caption container found via jsname'); return container; }
+
+              // Strategy 4: Look for "Turn off captions" button and find the caption area near it
+              const turnOffBtn = document.querySelector('button[aria-label="Turn off captions"]');
+              if (turnOffBtn) {
+                // Captions are on — look for the bottom area where captions render
+                // Google Meet renders captions in a container near the bottom of the meeting view
+                const candidates = document.querySelectorAll('div[style*="bottom"]');
+                for (const c of candidates) {
+                  const text = (c as HTMLElement).innerText?.trim();
+                  if (text && text.length > 0 && text.length < 500) {
+                    console.log('Caption container found via proximity to CC button');
+                    return c;
+                  }
+                }
               }
+
+              return null;
+            };
+
+            const attachScraper = (container: Element) => {
+              if (scraperAttached) return;
+              scraperAttached = true;
 
               console.log('Caption scraper attached to container');
               const seenTexts = new Set<string>();
 
-              const observer = new MutationObserver(() => {
+              const extractCaptions = () => {
                 try {
-                  // Find all caption line elements
-                  const lines = container.querySelectorAll('[jsname="YSxPC"] > div, [data-speaker-id]');
                   const batch: Array<{ speaker: string; text: string; ts: number }> = [];
 
-                  if (lines.length === 0) {
-                    // Fallback: read all child divs
-                    const childDivs = container.querySelectorAll('div');
-                    childDivs.forEach((div) => {
-                      const text = (div as HTMLElement).innerText?.trim();
-                      if (text && text.length > 3 && !seenTexts.has(text)) {
-                        seenTexts.add(text);
-                        batch.push({ speaker: 'Unknown', text, ts: Date.now() });
-                      }
-                    });
-                  } else {
-                    lines.forEach((line) => {
-                      // Speaker name element
-                      const speakerEl = line.querySelector('[jsname="bkEvMb"]') ||
-                                        line.querySelector('[data-speaker-id]');
-                      const speaker = speakerEl
-                        ? (speakerEl as HTMLElement).innerText?.trim() || 'Unknown'
-                        : 'Unknown';
+                  // Strategy A: Look for structured caption elements with speaker info
+                  const speakerElements = container.querySelectorAll(
+                    '[data-speaker-id], [jsname="bkEvMb"]'
+                  );
 
-                      // Caption text — usually the last text node or span
-                      const spans = line.querySelectorAll('span');
+                  if (speakerElements.length > 0) {
+                    // Structured captions with speaker identification
+                    speakerElements.forEach((speakerEl) => {
+                      const speaker = (speakerEl as HTMLElement).innerText?.trim() || 'Unknown';
+                      // Caption text is usually in a sibling or nearby element
+                      const parentLine = speakerEl.closest('div[data-speaker-id]') ||
+                                         speakerEl.parentElement?.parentElement;
+                      if (!parentLine) return;
+
+                      const spans = parentLine.querySelectorAll('span');
                       let text = '';
                       if (spans.length > 0) {
                         text = Array.from(spans)
                           .map((s) => (s as HTMLElement).innerText?.trim())
                           .filter(Boolean)
                           .join(' ');
+                        // Remove the speaker name from the text if it's included
+                        if (text.startsWith(speaker)) {
+                          text = text.slice(speaker.length).trim();
+                        }
                       } else {
-                        text = (line as HTMLElement).innerText?.trim() || '';
+                        text = (parentLine as HTMLElement).innerText?.trim() || '';
+                        if (text.startsWith(speaker)) {
+                          text = text.slice(speaker.length).trim();
+                        }
+                      }
+
+                      if (text && !seenTexts.has(`${speaker}:${text}`)) {
+                        seenTexts.add(`${speaker}:${text}`);
+                        batch.push({ speaker, text, ts: Date.now() });
+                      }
+                    });
+                  }
+
+                  // Strategy B: Fallback — parse all direct child divs as caption lines
+                  // Google Meet typically renders "Speaker Name\nCaption text" in each line
+                  if (batch.length === 0) {
+                    const childDivs = container.querySelectorAll(':scope > div, :scope > div > div');
+                    childDivs.forEach((div) => {
+                      const fullText = (div as HTMLElement).innerText?.trim();
+                      if (!fullText || fullText.length <= 3) return;
+
+                      // Try to split "Speaker Name\nCaption text" pattern
+                      const lines = fullText.split('\n');
+                      let speaker = 'Unknown';
+                      let text = fullText;
+                      if (lines.length >= 2) {
+                        // First line is likely the speaker name (short, no punctuation)
+                        const possibleSpeaker = lines[0].trim();
+                        if (possibleSpeaker.length < 50 && !possibleSpeaker.includes('.')) {
+                          speaker = possibleSpeaker;
+                          text = lines.slice(1).join(' ').trim();
+                        }
                       }
 
                       if (text && !seenTexts.has(`${speaker}:${text}`)) {
@@ -1187,11 +1294,36 @@ export class GoogleMeetBot extends MeetBotBase {
                     (window as any).screenAppSendCaption(JSON.stringify(batch));
                   }
                 } catch (err) {
-                  console.error('Caption scraper mutation error:', err);
+                  console.error('Caption scraper extraction error:', err);
                 }
-              });
+              };
 
+              // Use MutationObserver for real-time capture
+              const observer = new MutationObserver(extractCaptions);
               observer.observe(container, { childList: true, subtree: true, characterData: true });
+
+              // Also poll periodically in case MutationObserver misses updates
+              setInterval(extractCaptions, 2000);
+            };
+
+            // Poll for the caption container (it may not exist immediately after enabling CC)
+            const pollForContainer = () => {
+              const container = findCaptionContainer();
+              if (container) {
+                attachScraper(container);
+                return;
+              }
+
+              retryCount++;
+              if (retryCount < maxRetries) {
+                setTimeout(pollForContainer, 2000);
+              } else {
+                console.warn('Caption container not found after ' + maxRetries + ' retries — CC may not be enabled or selectors have changed');
+              }
+            };
+
+            try {
+              pollForContainer();
             } catch (err) {
               console.error('Failed to start caption scraper:', err);
             }
@@ -1292,12 +1424,27 @@ export class GoogleMeetBot extends MeetBotBase {
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
 
     waitingPromise.promise.then(async () => {
+      // Stop PulseAudio recorder and get the audio file path
+      let capturedAudioPath: string | null = null;
+      if (pulseAudioRecorder) {
+        try {
+          capturedAudioPath = await pulseAudioRecorder.stop();
+          this._logger.info('PulseAudio recorder stopped', { capturedAudioPath });
+        } catch (err) {
+          this._logger.warn('PulseAudio recorder stop failed', { error: (err as Error)?.message });
+        }
+      }
+
       this._logger.info('Closing the browser...');
       await this.page.context().browser()?.close();
 
-      // Attach captured captions and participant events to the uploader
+      // Attach captured captions, participant events, and audio path to the uploader
       if (typeof (uploader as any).setMeetingMetadata === 'function') {
-        (uploader as any).setMeetingMetadata({ captions, participants: participantEvents });
+        (uploader as any).setMeetingMetadata({
+          captions,
+          participants: participantEvents,
+          ...(capturedAudioPath && { audioPath: capturedAudioPath }),
+        });
       }
 
       this._logger.info('All done ✨', { eventId, botId, userId, teamId });

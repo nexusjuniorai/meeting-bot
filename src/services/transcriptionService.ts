@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { Logger } from 'winston';
 import config from '../config';
-import { extractAudio } from '../lib/audio-extract';
+import { extractAudio, validateAudioHasContent } from '../lib/audio-extract';
 import { transcribeWithOpenRouter } from './openrouterProvider';
 import { transcribeWithDeepgram } from './deepgramProvider';
 
@@ -44,6 +44,7 @@ export async function transcribeRecording(
     attendees: Array<{ name: string; email: string }>;
     captions?: Array<{ speaker: string; text: string; ts: number }>;
     botDisplayName?: string;
+    audioPath?: string;
   },
   logger: Logger
 ): Promise<TranscriptionResult> {
@@ -71,9 +72,34 @@ export async function transcribeRecording(
     ]),
   ].filter((n) => Boolean(n) && !isBotName(n));
 
+  // Use pre-recorded PulseAudio audio if available, otherwise extract from video
   let audioPath: string | undefined;
+  let audioFromPulse = false;
   try {
-    audioPath = await extractAudio(videoPath, logger);
+    if (meta.audioPath && fs.existsSync(meta.audioPath)) {
+      logger.info('Using PulseAudio-captured audio for transcription', { audioPath: meta.audioPath });
+      audioPath = meta.audioPath;
+      audioFromPulse = true;
+    } else {
+      if (meta.audioPath) {
+        logger.warn('PulseAudio audio path provided but file not found — falling back to video extraction', { audioPath: meta.audioPath });
+      }
+      audioPath = await extractAudio(videoPath, logger);
+    }
+
+    // Validate audio has actual content before sending to transcription
+    if (!validateAudioHasContent(audioPath, logger)) {
+      logger.warn('Audio is silent — returning empty transcription to avoid hallucinated output');
+      return {
+        provider: transcriptionProvider,
+        model: transcriptionModel,
+        language: transcriptionLanguage,
+        fullText: '',
+        utterances: [],
+        durationSeconds: 0,
+        transcribedAt: new Date().toISOString(),
+      };
+    }
 
     let utterances: TranscriptUtterance[];
     let durationSeconds: number;
@@ -118,7 +144,8 @@ export async function transcribeRecording(
       transcribedAt: new Date().toISOString(),
     };
   } finally {
-    if (audioPath) {
+    // Clean up extracted audio (but not PulseAudio file — GoogleMeetBot manages its own cleanup)
+    if (audioPath && !audioFromPulse) {
       fs.promises.unlink(audioPath).catch(() => {/* non-fatal */});
     }
   }

@@ -47,7 +47,7 @@ function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean 
 export interface IUploader {
   uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<boolean>;
   saveDataToTempFile(data: Buffer): Promise<boolean>;
-  setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void;
+  setMeetingMetadata(meta: { captions: any[]; participants: any[]; audioPath?: string }): void;
   setAttendees(attendees: Array<{ name: string; email: string }>): void;
   setBotDisplayName(name: string): void;
 }
@@ -64,7 +64,7 @@ class DiskUploader implements IUploader {
   private _tempFileId: string;
   private _logger: Logger;
   private _meetingLink?: string;
-  private _meetingMetadata: { captions: any[]; participants: any[]; attendees: Array<{ name: string; email: string }> } = { captions: [], participants: [], attendees: [] };
+  private _meetingMetadata: { captions: any[]; participants: any[]; attendees: Array<{ name: string; email: string }>; audioPath?: string } = { captions: [], participants: [], attendees: [] };
   private _botDisplayName?: string;
   private _lastLocalFilePath?: string;
 
@@ -313,11 +313,12 @@ class DiskUploader implements IUploader {
     this._botDisplayName = name;
   }
 
-  public setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void {
+  public setMeetingMetadata(meta: { captions: any[]; participants: any[]; audioPath?: string }): void {
     this._meetingMetadata = {
       captions: meta.captions,
       participants: meta.participants,
       attendees: this._meetingMetadata.attendees, // preserve attendees set via setAttendees
+      audioPath: meta.audioPath,
     };
   }
 
@@ -690,6 +691,7 @@ class DiskUploader implements IUploader {
               attendees: this._meetingMetadata.attendees,
               captions: this._meetingMetadata.captions,
               botDisplayName: this._botDisplayName,
+              audioPath: this._meetingMetadata.audioPath,
             },
             this._logger
           );

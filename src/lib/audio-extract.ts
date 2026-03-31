@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { Logger } from 'winston';
@@ -55,4 +55,54 @@ export async function extractAudio(inputPath: string, logger: Logger): Promise<s
   }
 
   return outputPath;
+}
+
+/**
+ * Detect whether an audio file contains actual speech or is effectively silent.
+ * Uses ffmpeg's volumedetect filter to measure peak and mean volume.
+ * Returns true if the audio has meaningful content above the silence threshold.
+ */
+export function validateAudioHasContent(audioPath: string, logger: Logger): boolean {
+  try {
+    // Use execFileSync to avoid shell injection — ffmpeg writes volumedetect to stderr
+    // so we capture it via stdio configuration
+    let output: string;
+    try {
+      execFileSync('ffmpeg', ['-i', audioPath, '-af', 'volumedetect', '-f', 'null', '-'], {
+        encoding: 'utf-8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      output = '';
+    } catch (err: any) {
+      // ffmpeg writes volumedetect stats to stderr and may exit with code 0 or 1
+      // The stderr output contains the data we need regardless of exit code
+      output = err?.stderr ?? '';
+    }
+
+    // Parse mean_volume and max_volume from ffmpeg output
+    const meanMatch = output.match(/mean_volume:\s*([-\d.]+)\s*dB/);
+    const maxMatch = output.match(/max_volume:\s*([-\d.]+)\s*dB/);
+
+    const meanVolume = meanMatch ? parseFloat(meanMatch[1]) : -91;
+    const maxVolume = maxMatch ? parseFloat(maxMatch[1]) : -91;
+
+    logger.info('Audio volume analysis', { meanVolume, maxVolume, audioPath: path.basename(audioPath) });
+
+    // -90 dB is essentially digital silence. Real speech is typically -30 to -10 dB mean.
+    // Threshold at -60 dB to catch very quiet recordings while rejecting silence.
+    if (meanVolume < -60 && maxVolume < -50) {
+      logger.warn('Audio file appears to be silent or near-silent — skipping transcription', {
+        meanVolume,
+        maxVolume,
+        audioPath: path.basename(audioPath),
+      });
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    logger.warn('Audio validation failed — proceeding with transcription anyway', { error: (err as Error)?.message });
+    return true; // Default to proceeding if validation itself fails
+  }
 }
