@@ -69,6 +69,9 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
         uploader.setAttendees(attendees);
       }
 
+      // Store bot display name so transcription can exclude it from speaker list
+      uploader.setBotDisplayName(name);
+
       // Create and join the meeting
       const bot = new GoogleMeetBot(logger, correlationId);
       await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader });

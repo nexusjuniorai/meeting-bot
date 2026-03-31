@@ -63,6 +63,9 @@ const joinMicrosoftTeams = async (req: Request, res: Response) => {
         url,
       );
 
+      // Store bot display name so transcription can exclude it from speaker list
+      uploader.setBotDisplayName(name);
+
       // Create and join the meeting
       const bot = new MicrosoftTeamsBot(logger, correlationId);
       await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader });

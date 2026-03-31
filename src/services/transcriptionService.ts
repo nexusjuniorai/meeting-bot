@@ -43,6 +43,7 @@ export async function transcribeRecording(
     participants: Array<{ name: string; action: string; ts: number }>;
     attendees: Array<{ name: string; email: string }>;
     captions?: Array<{ speaker: string; text: string; ts: number }>;
+    botDisplayName?: string;
   },
   logger: Logger
 ): Promise<TranscriptionResult> {
@@ -52,7 +53,15 @@ export async function transcribeRecording(
     throw new Error('TRANSCRIPTION_API_KEY is not configured');
   }
 
-  // Extract unique participant names to help the model label speakers
+  // Build set of bot name patterns to exclude from speaker list
+  const botPatterns = ['notetaker', 'screenapp', 'aheadx', 'meeting bot', 'recorder'];
+  const isBotName = (name: string): boolean => {
+    const lower = name.toLowerCase();
+    if (meta.botDisplayName && lower === meta.botDisplayName.toLowerCase()) return true;
+    return botPatterns.some((p) => lower.includes(p));
+  };
+
+  // Extract unique participant names, excluding the bot itself
   const participantNames = [
     ...new Set([
       ...meta.participants
@@ -60,7 +69,7 @@ export async function transcribeRecording(
         .map((p) => p.name.split('\n')[0].trim()),
       ...meta.attendees.map((a) => a.name),
     ]),
-  ].filter(Boolean);
+  ].filter((n) => Boolean(n) && !isBotName(n));
 
   let audioPath: string | undefined;
   try {
@@ -88,6 +97,7 @@ export async function transcribeRecording(
       const result = await transcribeWithOpenRouter(
         audioPath,
         participantNames,
+        meta.captions ?? [],
         transcriptionLanguage,
         transcriptionModel,
         transcriptionApiKey,

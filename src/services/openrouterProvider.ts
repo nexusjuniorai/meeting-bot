@@ -10,25 +10,48 @@ interface OpenRouterUtterance {
   endTime: number;
 }
 
-function buildPrompt(participantNames: string[], language: string): string {
+function buildCaptionContext(captions: Array<{ speaker: string; text: string; ts: number }>): string {
+  if (captions.length === 0) return '';
+
+  const filtered = captions.filter((c) => c.speaker && c.speaker !== 'Unknown');
+  if (filtered.length === 0) return '';
+
+  const minTs = Math.min(...filtered.map((c) => c.ts));
+  const lines = filtered.map((c) => {
+    const tSec = ((c.ts - minTs) / 1000).toFixed(1);
+    return `[${tSec}s] ${c.speaker}: ${c.text}`;
+  });
+
+  return `\n\nIMPORTANT — The meeting platform captured these live captions during the recording. Use them as ground truth for BOTH the words spoken AND who said them. The captions are accurate for speaker names but may have minor text differences — always prefer what you actually hear in the audio for exact wording, but use these captions to confirm speaker identity and approximate content:\n\n${lines.join('\n')}`;
+}
+
+function buildPrompt(participantNames: string[], captions: Array<{ speaker: string; text: string; ts: number }>, language: string): string {
   const nameList = participantNames.length > 0
-    ? `The known meeting participants are: ${participantNames.join(', ')}.`
+    ? `The HUMAN meeting participants are: ${participantNames.join(', ')}.`
     : 'The participant names are unknown.';
 
   const languageInstruction = language === 'auto'
     ? 'Detect the language spoken and transcribe every spoken word accurately in that language. Do NOT translate.'
     : `Transcribe every spoken word accurately in the original language (${language}). Do NOT translate.`;
 
-  return `You are a meeting transcription assistant. Your task is to transcribe the audio recording and identify each speaker.
+  const captionContext = buildCaptionContext(captions);
+
+  return `You are a precise meeting transcription assistant. Your ONLY task is to transcribe exactly what is said in the audio — nothing more, nothing less.
 
 ${nameList}
 
-Instructions:
+CRITICAL RULES:
 - ${languageInstruction}
-- Identify each distinct speaker by their voice and assign them a name from the participant list above.
-- If a speaker cannot be matched to a known name, label them "Speaker 1", "Speaker 2", etc.
+- Transcribe ONLY words that are actually spoken in the audio. Do NOT invent, hallucinate, or fabricate any speech.
+- If a section of audio is unclear or silent, skip it. Do NOT guess or fill in words.
+- Only attribute speech to participants who actually speak. If only one or two people talk, the transcript should only contain those speakers.
+- Do NOT attribute speech to ALL participants just because they are listed. Many participants may be silent listeners.
+- There is a recording bot in this meeting that does NOT speak. Never attribute any speech to a bot or notetaker.
+- Identify speakers by matching voices to the participant names provided. If you cannot confidently match a voice, use "Speaker 1", "Speaker 2", etc.
 - Group consecutive speech from the same speaker into a single segment.
 - Estimate start and end times in seconds from the beginning of the audio.
+- Accuracy is paramount. It is better to omit unclear words than to guess wrong.
+${captionContext}
 
 Return ONLY a valid JSON object in this exact format, with no markdown, no explanation:
 {
@@ -42,6 +65,7 @@ Return ONLY a valid JSON object in this exact format, with no markdown, no expla
 export async function transcribeWithOpenRouter(
   audioPath: string,
   participantNames: string[],
+  captions: Array<{ speaker: string; text: string; ts: number }>,
   language: string,
   model: string,
   apiKey: string,
@@ -52,9 +76,14 @@ export async function transcribeWithOpenRouter(
   const audioBuffer = await fs.promises.readFile(audioPath);
   const audioBase64 = audioBuffer.toString('base64');
 
-  const prompt = buildPrompt(participantNames, language);
+  const prompt = buildPrompt(participantNames, captions, language);
 
-  logger.info('Sending audio to OpenRouter', { model, language, participants: participantNames });
+  logger.info('Sending audio to OpenRouter', {
+    model,
+    language,
+    participants: participantNames,
+    captionCount: captions.length,
+  });
 
   const response = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',

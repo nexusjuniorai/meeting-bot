@@ -49,6 +49,7 @@ export interface IUploader {
   saveDataToTempFile(data: Buffer): Promise<boolean>;
   setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void;
   setAttendees(attendees: Array<{ name: string; email: string }>): void;
+  setBotDisplayName(name: string): void;
 }
 
 // Save to disk and upload in one session
@@ -64,6 +65,7 @@ class DiskUploader implements IUploader {
   private _logger: Logger;
   private _meetingLink?: string;
   private _meetingMetadata: { captions: any[]; participants: any[]; attendees: Array<{ name: string; email: string }> } = { captions: [], participants: [], attendees: [] };
+  private _botDisplayName?: string;
   private _lastLocalFilePath?: string;
 
   private readonly UPLOAD_CHUNK_SIZE = 50 * 1024 * 1024; // 50 MiB
@@ -305,6 +307,10 @@ class DiskUploader implements IUploader {
 
   public setAttendees(attendees: Array<{ name: string; email: string }>): void {
     this._meetingMetadata.attendees = attendees;
+  }
+
+  public setBotDisplayName(name: string): void {
+    this._botDisplayName = name;
   }
 
   public setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void {
@@ -683,6 +689,7 @@ class DiskUploader implements IUploader {
               participants: this._meetingMetadata.participants,
               attendees: this._meetingMetadata.attendees,
               captions: this._meetingMetadata.captions,
+              botDisplayName: this._botDisplayName,
             },
             this._logger
           );

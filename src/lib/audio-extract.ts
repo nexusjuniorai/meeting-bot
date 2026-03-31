@@ -6,7 +6,7 @@ import { Logger } from 'winston';
 /**
  * Extract audio from a video file as a mono MP3.
  * Uses stream demux (no re-encode of video) — audio only output.
- * Produces 16kHz mono MP3 at 64kbps (~29MB/hr) — compact for base64 encoding.
+ * Produces 24kHz mono MP3 at 128kbps — preserves speech detail for accurate transcription.
  */
 export async function extractAudio(inputPath: string, logger: Logger): Promise<string> {
   const outputPath = inputPath.replace(/\.(mp4|webm|mkv)$/i, '_audio.mp3');
@@ -23,9 +23,10 @@ export async function extractAudio(inputPath: string, logger: Logger): Promise<s
       '-i', inputPath,
       '-vn',                  // no video
       '-acodec', 'libmp3lame',
-      '-ar', '16000',         // 16kHz sample rate — optimal for speech recognition
-      '-ac', '1',             // mono — improves diarization accuracy
-      '-b:a', '64k',          // 64kbps bitrate
+      '-ar', '24000',         // 24kHz — preserves speech harmonics better than 16kHz
+      '-ac', '1',             // mono
+      '-b:a', '128k',         // 128kbps — retains clarity for transcription models
+      '-af', 'highpass=f=80,lowpass=f=8000,loudnorm', // filter noise, normalize volume
       outputPath,
     ]);
 
