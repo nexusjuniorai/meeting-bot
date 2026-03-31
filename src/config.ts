@@ -120,4 +120,7 @@ export default {
   // Generate: npx playwright codegen --save-storage=google-auth.json https://accounts.google.com
   // Then encode: base64 -i google-auth.json (macOS) or base64 google-auth.json (Linux)
   googleBotAuthState: process.env.GOOGLE_BOT_AUTH_STATE || '',
+  // Google bot account credentials — used to re-authenticate when storageState expires.
+  googleBotEmail: process.env.GOOGLE_BOT_EMAIL || '',
+  googleBotPassword: process.env.GOOGLE_BOT_PASSWORD || '',
 };

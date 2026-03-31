@@ -70,12 +70,12 @@ export class GoogleMeetBot extends MeetBotBase {
   }
 
   /**
-   * Navigate through the Google account chooser and any intermediate consent/confirmation
-   * pages until the browser is back on meet.google.com.
-   * Handles: account selection → "OK"/"Allow"/"Continue" interstitials → redirect back.
+   * Navigate through the Google account chooser, password page, and any intermediate
+   * consent/confirmation pages until the browser is back on meet.google.com.
+   * Handles: account selection → password entry → consent interstitials → redirect back.
    */
   private async navigateGoogleAccountFlow(meetUrl: string, userId?: string, teamId?: string): Promise<void> {
-    const maxSteps = 6;
+    const maxSteps = 10;
     for (let step = 0; step < maxSteps; step++) {
       const pageUrl = this.page.url();
       const pageBody = await this.page.evaluate(() => document.body.innerText || '');
@@ -112,8 +112,56 @@ export class GoogleMeetBot extends MeetBotBase {
         }
       }
 
-      // Consent / confirmation interstitials — click through common buttons
-      const consentTexts = ['Continue', 'Allow', 'OK', 'Accept', 'Confirm', 'Next', 'I agree'];
+      // Password page — fill password and submit
+      if (pageBody.includes('Enter your password') || pageBody.includes('Enter a password')) {
+        if (!config.googleBotPassword) {
+          this._logger.warn('Password page detected but GOOGLE_BOT_PASSWORD is not set — cannot authenticate', { userId, teamId });
+          break;
+        }
+        try {
+          const passwordInput = this.page.locator('input[type="password"]').first();
+          await passwordInput.fill(config.googleBotPassword, { timeout: 5000 });
+          this._logger.info('Filled password field', { userId, teamId });
+          await this.page.waitForTimeout(500);
+
+          const nextBtn = this.page.locator('button', { hasText: /^Next$/i }).first();
+          if (await nextBtn.count() > 0) {
+            await nextBtn.click({ timeout: 5000 });
+            this._logger.info('Clicked Next after password entry', { userId, teamId });
+          }
+          await this.page.waitForTimeout(4000);
+          continue;
+        } catch(e) {
+          this._logger.warn('Failed to fill password', { error: e, userId, teamId });
+        }
+      }
+
+      // Email/identifier page — fill email if shown (rare, but possible if cookies are fully cleared)
+      if (pageBody.includes('Email or phone') || pageBody.includes('Sign in with your Google Account')) {
+        if (!config.googleBotEmail) {
+          this._logger.warn('Email page detected but GOOGLE_BOT_EMAIL is not set — cannot authenticate', { userId, teamId });
+          break;
+        }
+        try {
+          const emailInput = this.page.locator('input[type="email"]').first();
+          await emailInput.fill(config.googleBotEmail, { timeout: 5000 });
+          this._logger.info('Filled email field', { userId, teamId });
+          await this.page.waitForTimeout(500);
+
+          const nextBtn = this.page.locator('button', { hasText: /^Next$/i }).first();
+          if (await nextBtn.count() > 0) {
+            await nextBtn.click({ timeout: 5000 });
+            this._logger.info('Clicked Next after email entry', { userId, teamId });
+          }
+          await this.page.waitForTimeout(3000);
+          continue;
+        } catch(e) {
+          this._logger.warn('Failed to fill email', { error: e, userId, teamId });
+        }
+      }
+
+      // Consent / confirmation interstitials — click through (but NOT "Next" alone, to avoid looping on password page)
+      const consentTexts = ['Continue', 'Allow', 'OK', 'Accept', 'Confirm', 'I agree'];
       let clickedConsent = false;
       for (const text of consentTexts) {
         try {
