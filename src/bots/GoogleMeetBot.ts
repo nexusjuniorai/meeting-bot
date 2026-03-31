@@ -170,6 +170,60 @@ export class GoogleMeetBot extends MeetBotBase {
         }
       }
 
+      // "Something went wrong" error — click Restart/Try again
+      if (pageBody.includes('Something went wrong') || pageBody.includes('something went wrong')) {
+        this._logger.warn('Google showed "Something went wrong" — clicking Restart/Try again', { userId, teamId });
+        try {
+          const restartBtn = this.page.locator('button, a', { hasText: /Restart|Try again/i }).first();
+          if (await restartBtn.count() > 0) {
+            await restartBtn.click({ timeout: 5000 });
+            await this.page.waitForTimeout(3000);
+            continue;
+          }
+        } catch { /* fall through */ }
+        // If no button found, navigate fresh
+        await this.page.goto(meetUrl, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForTimeout(3000);
+        continue;
+      }
+
+      // Recovery phone/email prompts — skip them
+      if (
+        pageBody.includes('Add a recovery phone') ||
+        pageBody.includes('Don\'t get locked out') ||
+        pageBody.includes('Confirm your recovery email') ||
+        pageBody.includes('Confirm your recovery phone') ||
+        pageBody.includes('Keep your account secure')
+      ) {
+        this._logger.info('Recovery/security prompt detected — attempting to skip', { userId, teamId });
+        const skipTexts = ['Skip', 'Not now', 'Remind me later', 'Done'];
+        let skipped = false;
+        for (const text of skipTexts) {
+          try {
+            const btn = this.page.locator('button, a', { hasText: new RegExp(`^${text}$`, 'i') }).first();
+            if (await btn.count() > 0 && await btn.isVisible()) {
+              await btn.click({ timeout: 5000 });
+              this._logger.info(`Clicked "${text}" to skip recovery prompt`, { userId, teamId });
+              skipped = true;
+              await this.page.waitForTimeout(3000);
+              break;
+            }
+          } catch { /* try next */ }
+        }
+        if (skipped) continue;
+      }
+
+      // 2-Step Verification / CAPTCHA — cannot solve programmatically, bail out
+      if (
+        pageBody.includes('2-Step Verification') ||
+        pageBody.includes('Verify it\'s you') ||
+        pageBody.includes('Confirm that it\'s you') ||
+        pageBody.includes('This device isn\'t recognized')
+      ) {
+        this._logger.error('Google 2-Step Verification or identity challenge detected — cannot proceed. Disable 2FA on the bot account.', { userId, teamId });
+        break;
+      }
+
       // Consent / confirmation interstitials — click through (but NOT "Next" alone, to avoid looping on password page)
       const consentTexts = ['Continue', 'Allow', 'OK', 'Accept', 'Confirm', 'I agree'];
       let clickedConsent = false;
