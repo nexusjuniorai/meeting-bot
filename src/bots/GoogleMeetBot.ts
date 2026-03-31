@@ -273,11 +273,14 @@ export class GoogleMeetBot extends MeetBotBase {
 
     let googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
 
-    // --- Signed-in bot landed on accounts.google.com — try to navigate through, then fall back to guest ---
+    // --- Signed-in bot landed on accounts.google.com — clear stale cookies and do a fresh login ---
     if (googleMeetPageStatus === 'SIGN_IN_PAGE' && isSignedIn) {
-      this._logger.warn('Signed-in bot redirected to Google account page — clearing stale cookies before login', { userId, teamId });
-      // Clear expired storageState cookies so they don't conflict with the fresh login session
+      this._logger.warn('Signed-in bot redirected to Google account page — clearing stale cookies and navigating fresh', { userId, teamId });
+      // Clear expired storageState cookies, then navigate to Meet again for a clean sign-in flow
       await this.page.context().clearCookies();
+      await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+      await this.page.waitForTimeout(2000);
+
       try {
         await this.navigateGoogleAccountFlow(url, userId, teamId);
       } catch(e) {
@@ -288,8 +291,8 @@ export class GoogleMeetBot extends MeetBotBase {
       googleMeetPageStatus = await verifyItIsOnGoogleMeetPage();
 
       if (googleMeetPageStatus !== 'GOOGLE_MEET_PAGE') {
-        // Auth is truly expired — clear cookies and retry as guest
-        this._logger.warn('Auth state expired — clearing cookies and falling back to guest mode', { userId, teamId });
+        // Password login didn't work — fall back to guest mode
+        this._logger.warn('Password login failed — clearing cookies and falling back to guest mode', { userId, teamId });
         await this.page.context().clearCookies();
         await this.page.goto(url, { waitUntil: 'domcontentloaded' });
         isSignedIn = false;
