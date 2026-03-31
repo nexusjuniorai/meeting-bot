@@ -273,21 +273,15 @@ export class GoogleMeetBot extends MeetBotBase {
             let botWasDeniedAccess = false;
 
             try {
-              peopleElement = await this.page.waitForSelector('button[aria-label="People"]', { timeout: 5000 });
+              peopleElement = await this.page.waitForSelector('button[aria-label="People"]', { timeout: 2000 });
             } catch(e) {
-              this._logger.error(
-                'wait error', { error: e }
-              );
-              //do nothing
+              //do nothing - element not present yet
             }
 
             try {
-              callButtonElement = await this.page.waitForSelector('button[aria-label="Leave call"]', { timeout: 5000 });
+              callButtonElement = await this.page.waitForSelector('button[aria-label="Leave call"]', { timeout: 2000 });
             } catch(e) {
-              this._logger.error(
-                'wait error', { error: e }
-              );
-              //do nothing
+              //do nothing - element not present yet
             }
 
             if (peopleElement || callButtonElement) {
@@ -385,12 +379,9 @@ export class GoogleMeetBot extends MeetBotBase {
               resolveWaiting(false);
             }
           } catch(e) {
-            this._logger.error(
-              'wait error', { error: e }
-            );
-            // Do nothing
+            // Do nothing - transient error during lobby polling
           }
-        }, 20000);
+        }, 3000);
       });
 
       const waitingAtLobbySuccess = await waitAtLobbyPromise;
