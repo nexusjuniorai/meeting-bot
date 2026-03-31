@@ -248,138 +248,64 @@ export class GoogleMeetBot extends MeetBotBase {
 
         waitInterval = setInterval(async () => {
           try {
-            const detectLobbyModeHostWaitingText = async (): Promise<'WAITING_FOR_HOST_TO_ADMIT_BOT' | 'WAITING_REQUEST_TIMEOUT' | 'LOBBY_MODE_NOT_ACTIVE' | 'UNABLE_TO_DETECT_LOBBY_MODE'> => {
-              try {
-                const lobbyModeHostWaitingText = await this.page.getByText(GOOGLE_LOBBY_MODE_HOST_TEXT);
-                if (await lobbyModeHostWaitingText.count() > 0 && await lobbyModeHostWaitingText.isVisible()) {
+            // Always check page state via evaluate — fast, non-blocking, no selector timeouts
+            const pageState = await this.page.evaluate((constants) => {
+              const bodyText = document.body.innerText || '';
+
+              // Check lobby/waiting states
+              if (bodyText.includes(constants.lobbyWaitText)) return 'WAITING_FOR_HOST_TO_ADMIT_BOT';
+              if (bodyText.includes(constants.requestTimeout)) return 'WAITING_REQUEST_TIMEOUT';
+              if (bodyText.includes(constants.requestDenied)) return 'DENIED';
+
+              // Check if we're in the call: look for Leave call button (multiple aria-label variants)
+              const leaveBtn = document.querySelector(
+                'button[aria-label="Leave call"], button[aria-label="Leave"], button[aria-label="End call"]'
+              );
+              if (leaveBtn) {
+                // Still in lobby if lobby text is visible
+                if (bodyText.includes('Asking to join') || bodyText.includes('Please wait')) {
                   return 'WAITING_FOR_HOST_TO_ADMIT_BOT';
                 }
-
-                const lobbyModeRequestTimeoutText = await this.page.getByText(GOOGLE_REQUEST_TIMEOUT);
-                if (await lobbyModeRequestTimeoutText.count() > 0 && await lobbyModeRequestTimeoutText.isVisible()) {
-                  return 'WAITING_REQUEST_TIMEOUT';
-                }
-
-                return 'LOBBY_MODE_NOT_ACTIVE';
+                return 'IN_CALL';
               }
-              catch (e) {
-                this._logger.error('Error detecting lobby mode host waiting text...', { error: e, message: e?.message });
-                return 'UNABLE_TO_DETECT_LOBBY_MODE';
+
+              // Check People button with participant count as secondary in-call signal
+              const peopleBtn = document.querySelector('button[aria-label^="People"]');
+              if (peopleBtn) {
+                const label = peopleBtn.getAttribute('aria-label') || '';
+                if (/People.*?\d+/.test(label)) return 'IN_CALL';
               }
-            };
 
-            let peopleElement;
-            let callButtonElement;
-            let botWasDeniedAccess = false;
+              return 'UNKNOWN';
+            }, {
+              lobbyWaitText: GOOGLE_LOBBY_MODE_HOST_TEXT,
+              requestTimeout: GOOGLE_REQUEST_TIMEOUT,
+              requestDenied: GOOGLE_REQUEST_DENIED,
+            });
 
-            try {
-              peopleElement = await this.page.waitForSelector('button[aria-label="People"]', { timeout: 2000 });
-            } catch(e) {
-              //do nothing - element not present yet
-            }
+            this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
 
-            try {
-              callButtonElement = await this.page.waitForSelector('button[aria-label="Leave call"]', { timeout: 2000 });
-            } catch(e) {
-              //do nothing - element not present yet
-            }
-
-            if (peopleElement || callButtonElement) {
-              // Here check the "lobby mode" that waits for the Host to join the meeting or for the Host to admit the bot
-              const lobbyModeHostWaitingText = await detectLobbyModeHostWaitingText();
-              if (lobbyModeHostWaitingText === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
-                this._logger.info('Lobbdy Mode: Google Meet Bot is waiting for the host to admit it...', { userId, teamId });
-              } else if (lobbyModeHostWaitingText === 'WAITING_REQUEST_TIMEOUT') {
-                this._logger.info('Lobby Mode: Google Meet Bot join request timed out...', { userId, teamId });
-                clearInterval(waitInterval);
-                clearTimeout(waitTimeout);
-                resolveWaiting(false);
-                return;
-              } else {
-                // Additional check: Verify we can actually see participants (not just UI buttons)
-                // The "Leave call" button can exist even in lobby waiting state
-                try {
-                  const participantCountDetected = await this.page.evaluate(() => {
-                    try {
-                      // Look for People button with participant count
-                      const peopleButton = document.querySelector('button[aria-label^="People"]');
-                      if (peopleButton) {
-                        const ariaLabel = peopleButton.getAttribute('aria-label');
-                        // Check if we can see participant count (e.g., "People - 2 joined")
-                        const match = ariaLabel?.match(/People.*?(\d+)/);
-                        if (match && parseInt(match[1]) >= 1) {
-                          return true;
-                        }
-                      }
-
-                      // Alternative: Check if participant count is visible in the DOM
-                      const allButtons = Array.from(document.querySelectorAll('button'));
-                      for (const btn of allButtons) {
-                        const label = btn.getAttribute('aria-label');
-                        if (label && /People.*?\d+/.test(label)) {
-                          return true;
-                        }
-                      }
-
-                      // Fallback: Check for text that indicates we're in the call
-                      const bodyText = document.body.innerText;
-                      if (bodyText.includes('You have joined the call') ||
-                          bodyText.includes('other person in the call') ||
-                          bodyText.includes('people in the call')) {
-                        return true;
-                      }
-
-                      // Fallback: Check for Leave call button which indicates we're in a call
-                      const leaveCallButton = document.querySelector('button[aria-label="Leave call"]');
-                      if (leaveCallButton) {
-                        // If we have Leave call button AND no lobby mode text, we're likely in the call
-                        const hasLobbyText = bodyText.includes('Asking to join') ||
-                                            bodyText.includes('You\'re the only one here');
-                        if (!hasLobbyText) {
-                          return true;
-                        }
-                      }
-
-                      return false;
-                    } catch (e) {
-                      return false;
-                    }
-                  });
-
-                  if (participantCountDetected) {
-                    this._logger.info('Google Meet Bot is entering the meeting...', { userId, teamId });
-                    clearInterval(waitInterval);
-                    clearTimeout(waitTimeout);
-                    resolveWaiting(true);
-                    return;
-                  } else {
-                    this._logger.info('People button found but participant count not visible yet - continuing to wait...', { userId, teamId });
-                    return;
-                  }
-                } catch (e) {
-                  this._logger.error('Error checking participant visibility', { error: e });
-                  return;
-                }
-              }              
-            }
-
-            try {
-              const deniedText = await this.page.getByText(GOOGLE_REQUEST_DENIED);
-              if (await deniedText.count() > 0 && await deniedText.isVisible()) {
-                botWasDeniedAccess = true;
-              }
-            }
-            catch(e) {
-              //do nothing
-            }
-            if (botWasDeniedAccess) {
+            if (pageState === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
+              // Still waiting — do nothing, keep polling
+            } else if (pageState === 'WAITING_REQUEST_TIMEOUT') {
+              this._logger.info('Lobby Mode: Google Meet Bot join request timed out...', { userId, teamId });
+              clearInterval(waitInterval);
+              clearTimeout(waitTimeout);
+              resolveWaiting(false);
+            } else if (pageState === 'DENIED') {
               this._logger.info('Google Meet Bot is denied access to the meeting...', { userId, teamId });
               clearInterval(waitInterval);
               clearTimeout(waitTimeout);
               resolveWaiting(false);
+            } else if (pageState === 'IN_CALL') {
+              this._logger.info('Google Meet Bot is entering the meeting...', { userId, teamId });
+              clearInterval(waitInterval);
+              clearTimeout(waitTimeout);
+              resolveWaiting(true);
             }
+            // UNKNOWN: keep polling
           } catch(e) {
-            // Do nothing - transient error during lobby polling
+            this._logger.warn('Lobby polling error (will retry)', { error: e });
           }
         }, 3000);
       });
