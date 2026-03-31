@@ -106,6 +106,15 @@ export default {
     uploadConcurrency: process.env.AZURE_UPLOAD_CONCURRENCY ? Number(process.env.AZURE_UPLOAD_CONCURRENCY) : 4,
   },
   uploaderType: process.env.UPLOADER_TYPE ? (process.env.UPLOADER_TYPE as UploaderType) : 's3' as UploaderType,
+  // Transcription (disabled by default)
+  transcriptionEnabled: process.env.TRANSCRIPTION_ENABLED === 'true',
+  transcriptionProvider: process.env.TRANSCRIPTION_PROVIDER || 'openrouter',
+  transcriptionApiKey: process.env.TRANSCRIPTION_API_KEY,
+  transcriptionLanguage: process.env.TRANSCRIPTION_LANGUAGE || 'pt-BR',
+  transcriptionModel: process.env.TRANSCRIPTION_MODEL || 'google/gemini-2.5-flash',
+  transcriptionTimeoutMs: process.env.TRANSCRIPTION_TIMEOUT_MS
+    ? Number(process.env.TRANSCRIPTION_TIMEOUT_MS)
+    : 300000,
   // Base64-encoded Playwright storageState JSON for Google Meet bot sign-in.
   // When set, the bot joins as a signed-in Google account (with profile picture).
   // Generate: npx playwright codegen --save-storage=google-auth.json https://accounts.google.com

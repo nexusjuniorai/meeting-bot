@@ -146,6 +146,11 @@ export class RedisConsumerService {
           meetingParams.url,
         );
 
+        // Set attendees on uploader before joining so they are included in the webhook
+        if (meetingParams.attendees && meetingParams.attendees.length > 0) {
+          uploader.setAttendees(meetingParams.attendees);
+        }
+
         // Create and join the meeting
         const joinParams: JoinParams = {
           url: meetingParams.url,
@@ -156,7 +161,7 @@ export class RedisConsumerService {
           userId: meetingParams.userId,
           eventId: meetingParams.eventId,
           botId: meetingParams.botId,
-          uploader
+          uploader,
         };
 
         switch (meetingParams.provider) {

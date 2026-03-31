@@ -15,6 +15,7 @@ import { getStorageProvider } from '../uploader/providers/factory';
 import { getTimeString } from '../lib/datetime';
 import { notifyRecordingCompleted, RecordingCompletedPayload } from '../services/notificationService';
 import { remuxToMp4 } from '../lib/remux';
+import { transcribeRecording, TranscriptionResult } from '../services/transcriptionService';
 
 console.log(' ----- PWD OR CWD ----- ', process.cwd());
 
@@ -47,6 +48,7 @@ export interface IUploader {
   uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<boolean>;
   saveDataToTempFile(data: Buffer): Promise<boolean>;
   setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void;
+  setAttendees(attendees: Array<{ name: string; email: string }>): void;
 }
 
 // Save to disk and upload in one session
@@ -61,7 +63,8 @@ class DiskUploader implements IUploader {
   private _tempFileId: string;
   private _logger: Logger;
   private _meetingLink?: string;
-  private _meetingMetadata: { captions: any[]; participants: any[] } = { captions: [], participants: [] };
+  private _meetingMetadata: { captions: any[]; participants: any[]; attendees: Array<{ name: string; email: string }> } = { captions: [], participants: [], attendees: [] };
+  private _lastLocalFilePath?: string;
 
   private readonly UPLOAD_CHUNK_SIZE = 50 * 1024 * 1024; // 50 MiB
 
@@ -300,8 +303,16 @@ class DiskUploader implements IUploader {
     }
   }
 
+  public setAttendees(attendees: Array<{ name: string; email: string }>): void {
+    this._meetingMetadata.attendees = attendees;
+  }
+
   public setMeetingMetadata(meta: { captions: any[]; participants: any[] }): void {
-    this._meetingMetadata = meta;
+    this._meetingMetadata = {
+      captions: meta.captions,
+      participants: meta.participants,
+      attendees: this._meetingMetadata.attendees, // preserve attendees set via setAttendees
+    };
   }
 
   public async saveDataToTempFile(data: Buffer) {
@@ -513,6 +524,9 @@ class DiskUploader implements IUploader {
       }
     }
 
+    // Store resolved path so transcription can access it after upload
+    this._lastLocalFilePath = filePath;
+
     const chunkSize = this.UPLOAD_CHUNK_SIZE;
 
     // Compose key to preserve existing S3 layout for parity
@@ -659,7 +673,30 @@ class DiskUploader implements IUploader {
         throw new Error(`Unsupported UPLOADER_TYPE configuration: ${config.uploaderType}`);
       }
 
-      // Delete temp file after the upload is finished
+      // Optional: transcribe the recording before deleting the temp file
+      let transcriptionResult: TranscriptionResult | undefined;
+      if (uploadResult && config.transcriptionEnabled && this._lastLocalFilePath) {
+        try {
+          transcriptionResult = await transcribeRecording(
+            this._lastLocalFilePath,
+            {
+              participants: this._meetingMetadata.participants,
+              attendees: this._meetingMetadata.attendees,
+              captions: this._meetingMetadata.captions,
+            },
+            this._logger
+          );
+          this._logger.info('Transcription completed', {
+            utterances: transcriptionResult.utterances.length,
+            durationSeconds: transcriptionResult.durationSeconds,
+            model: transcriptionResult.model,
+          });
+        } catch (transcriptionErr) {
+          this._logger.warn('Transcription failed, webhook will be sent without transcript', transcriptionErr as any);
+        }
+      }
+
+      // Delete temp file after upload (and transcription, which needs the file)
       await this.deleteTempFileAsync();
 
       // Send optional notifications on success
@@ -679,6 +716,8 @@ class DiskUploader implements IUploader {
               uploaderType: config.uploaderType,
               participants: this._meetingMetadata.participants,
               captions: this._meetingMetadata.captions,
+              attendees: this._meetingMetadata.attendees,
+              ...(transcriptionResult && { transcript: transcriptionResult }),
             },
           };
           await notifyRecordingCompleted(payload, this._logger);

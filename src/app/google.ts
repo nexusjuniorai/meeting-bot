@@ -22,6 +22,7 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
     eventId,
     botId,
     avatarUrl,
+    attendees,
   }: MeetingJoinParams = req.body;
 
   // Validate required fields
@@ -63,6 +64,11 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
         logger,
         url,
       );
+
+      // Set attendees on uploader before joining so they are included in the webhook
+      if (attendees && attendees.length > 0) {
+        uploader.setAttendees(attendees);
+      }
 
       // Create and join the meeting
       const bot = new GoogleMeetBot(logger, correlationId);
