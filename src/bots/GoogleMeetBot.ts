@@ -857,6 +857,19 @@ export class GoogleMeetBot extends MeetBotBase {
     const audioRecordingPath = path.join(process.cwd(), 'dist', '_tempvideo', userId, `${botId || 'audio'}_pulse_audio.mp3`);
     try {
       await fs.promises.mkdir(path.dirname(audioRecordingPath), { recursive: true });
+
+      // Diagnostic: check PulseAudio state before starting recorder
+      try {
+        const { execFileSync } = await import('child_process');
+        const pactlInfo = execFileSync('pactl', ['info'], { encoding: 'utf-8', timeout: 5000 });
+        const defaultSink = pactlInfo.split('\n').find(l => l.includes('Default Sink'))?.trim() || 'unknown';
+        const sources = execFileSync('pactl', ['list', 'sources', 'short'], { encoding: 'utf-8', timeout: 5000 }).trim();
+        const sinkInputs = execFileSync('pactl', ['list', 'sink-inputs', 'short'], { encoding: 'utf-8', timeout: 5000 }).trim();
+        this._logger.info('PulseAudio diagnostics', { defaultSink, sources, sinkInputs: sinkInputs || '(none)' });
+      } catch(e) {
+        this._logger.warn('PulseAudio diagnostics failed', { error: (e as Error)?.message });
+      }
+
       pulseAudioRecorder = new PulseAudioRecorder(audioRecordingPath, this._logger);
       await pulseAudioRecorder.start();
     } catch (err) {
@@ -1437,9 +1450,21 @@ export class GoogleMeetBot extends MeetBotBase {
               console.log('Caption scraper attached to container');
               const seenTexts = new Set<string>();
 
+              // Known UI chrome that the CC settings bar injects into innerText
+              const CC_UI_NOISE = /^(language|English|closed_caption|Live captions|format_size|Font size|circle|Font color|settings|Open caption settings|Turn off captions|Turn on captions)\s*/i;
+
+              let loggedContainerOnce = false;
+
               const extractCaptions = () => {
                 try {
                   const batch: Array<{ speaker: string; text: string; ts: number }> = [];
+
+                  // Log the container HTML once to help debug selector issues
+                  if (!loggedContainerOnce) {
+                    console.log('Caption container tag:', container.tagName, 'classes:', container.className);
+                    console.log('Caption container innerText (first 500):', (container as HTMLElement).innerText?.slice(0, 500));
+                    loggedContainerOnce = true;
+                  }
 
                   // Strategy A: Look for structured caption elements with speaker info
                   const speakerElements = container.querySelectorAll(
@@ -1447,10 +1472,8 @@ export class GoogleMeetBot extends MeetBotBase {
                   );
 
                   if (speakerElements.length > 0) {
-                    // Structured captions with speaker identification
                     speakerElements.forEach((speakerEl) => {
                       const speaker = (speakerEl as HTMLElement).innerText?.trim() || 'Unknown';
-                      // Caption text is usually in a sibling or nearby element
                       const parentLine = speakerEl.closest('div[data-speaker-id]') ||
                                          speakerEl.parentElement?.parentElement;
                       if (!parentLine) return;
@@ -1462,7 +1485,6 @@ export class GoogleMeetBot extends MeetBotBase {
                           .map((s) => (s as HTMLElement).innerText?.trim())
                           .filter(Boolean)
                           .join(' ');
-                        // Remove the speaker name from the text if it's included
                         if (text.startsWith(speaker)) {
                           text = text.slice(speaker.length).trim();
                         }
@@ -1480,22 +1502,39 @@ export class GoogleMeetBot extends MeetBotBase {
                     });
                   }
 
-                  // Strategy B: Fallback — parse all direct child divs as caption lines
-                  // Google Meet typically renders "Speaker Name\nCaption text" in each line
+                  // Strategy B: Fallback — parse child divs, but filter out CC settings UI
                   if (batch.length === 0) {
                     const childDivs = container.querySelectorAll(':scope > div, :scope > div > div');
                     childDivs.forEach((div) => {
+                      // Skip UI control elements (buttons, settings, toolbars)
+                      if ((div as HTMLElement).querySelector('button, [role="toolbar"], [role="menu"]')) return;
+                      const ariaRole = div.getAttribute('role');
+                      if (ariaRole === 'toolbar' || ariaRole === 'menu' || ariaRole === 'menubar') return;
+
                       const fullText = (div as HTMLElement).innerText?.trim();
                       if (!fullText || fullText.length <= 3) return;
 
+                      // Strip known CC UI chrome prefix from the text
+                      let cleanText = fullText;
+                      // Remove the well-known settings bar text block
+                      const settingsEnd = cleanText.indexOf('Open caption settings');
+                      if (settingsEnd !== -1) {
+                        cleanText = cleanText.slice(settingsEnd + 'Open caption settings'.length).trim();
+                      }
+                      // Also strip individual UI noise tokens at the start
+                      while (CC_UI_NOISE.test(cleanText)) {
+                        cleanText = cleanText.replace(CC_UI_NOISE, '').trim();
+                      }
+
+                      if (!cleanText || cleanText.length <= 3) return;
+
                       // Try to split "Speaker Name\nCaption text" pattern
-                      const lines = fullText.split('\n');
+                      const lines = cleanText.split('\n');
                       let speaker = 'Unknown';
-                      let text = fullText;
+                      let text = cleanText;
                       if (lines.length >= 2) {
-                        // First line is likely the speaker name (short, no punctuation)
                         const possibleSpeaker = lines[0].trim();
-                        if (possibleSpeaker.length < 50 && !possibleSpeaker.includes('.')) {
+                        if (possibleSpeaker.length > 0 && possibleSpeaker.length < 50 && !possibleSpeaker.includes('.')) {
                           speaker = possibleSpeaker;
                           text = lines.slice(1).join(' ').trim();
                         }
