@@ -251,6 +251,12 @@ export class GoogleMeetBot extends MeetBotBase {
             // Always check page state via evaluate — fast, non-blocking, no selector timeouts
             const { pageState, bodyText: pageBodyText } = await this.page.evaluate((constants) => {
               const bodyText = document.body.innerText || '';
+              const pageUrl = window.location.href;
+
+              // Google account chooser — bot got redirected away from Meet
+              if (pageUrl.includes('accounts.google.com') || bodyText.includes('Choose an account')) {
+                return { pageState: 'ACCOUNT_CHOOSER', bodyText };
+              }
 
               // Check lobby/waiting states
               if (bodyText.includes(constants.lobbyWaitText)) return { pageState: 'WAITING_FOR_HOST_TO_ADMIT_BOT', bodyText };
@@ -283,13 +289,29 @@ export class GoogleMeetBot extends MeetBotBase {
               requestDenied: GOOGLE_REQUEST_DENIED,
             });
 
-            if (pageState === 'UNKNOWN') {
-              this._logger.info('Lobby polling — page state UNKNOWN, body text snapshot', { bodyText: pageBodyText?.slice(0, 500), userId, teamId });
-            } else {
-              this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
-            }
+            this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
 
-            if (pageState === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
+            if (pageState === 'ACCOUNT_CHOOSER') {
+              // Bot was redirected to Google account chooser — click the bot account and navigate back
+              this._logger.warn('Bot redirected to Google account chooser — selecting account and returning to meeting', { userId, teamId });
+              try {
+                const accountLinks = await this.page.locator('a[data-email], div[data-email]').all();
+                if (accountLinks.length > 0) {
+                  await accountLinks[0].click({ timeout: 5000 });
+                } else {
+                  // Fallback: click the first listed account element
+                  const firstAccount = this.page.locator('li').first();
+                  if (await firstAccount.count() > 0) await firstAccount.click({ timeout: 5000 });
+                }
+                // Navigate back to the meeting after account selection
+                await this.page.waitForTimeout(2000);
+                if (!this.page.url().includes('meet.google.com')) {
+                  await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+                }
+              } catch(e) {
+                this._logger.warn('Failed to recover from account chooser', { error: e, userId, teamId });
+              }
+            } else if (pageState === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
               // Still waiting — do nothing, keep polling
             } else if (pageState === 'WAITING_REQUEST_TIMEOUT') {
               this._logger.info('Lobby Mode: Google Meet Bot join request timed out...', { userId, teamId });
@@ -306,8 +328,9 @@ export class GoogleMeetBot extends MeetBotBase {
               clearInterval(waitInterval);
               clearTimeout(waitTimeout);
               resolveWaiting(true);
+            } else if (pageState === 'UNKNOWN') {
+              this._logger.info('Lobby polling — UNKNOWN state, body text snapshot', { bodyText: pageBodyText?.slice(0, 500), userId, teamId });
             }
-            // UNKNOWN: keep polling
           } catch(e) {
             this._logger.warn('Lobby polling error (will retry)', { error: e });
           }
