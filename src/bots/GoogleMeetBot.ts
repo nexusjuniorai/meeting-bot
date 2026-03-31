@@ -22,6 +22,7 @@ import * as fs from 'fs';
 export class GoogleMeetBot extends MeetBotBase {
   private _logger: Logger;
   private _correlationId: string;
+  private _meetUrl: string = '';
   constructor(logger: Logger, correlationId: string) {
     super();
     this.slightlySecretId = v4();
@@ -206,6 +207,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
   private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this._logger.info('Launching browser...');
+    this._meetUrl = url;
 
     let isSignedIn = !!config.googleBotAuthState;
 
@@ -273,7 +275,9 @@ export class GoogleMeetBot extends MeetBotBase {
 
     // --- Signed-in bot landed on accounts.google.com — try to navigate through, then fall back to guest ---
     if (googleMeetPageStatus === 'SIGN_IN_PAGE' && isSignedIn) {
-      this._logger.warn('Signed-in bot redirected to Google account page — attempting account flow', { userId, teamId });
+      this._logger.warn('Signed-in bot redirected to Google account page — clearing stale cookies before login', { userId, teamId });
+      // Clear expired storageState cookies so they don't conflict with the fresh login session
+      await this.page.context().clearCookies();
       try {
         await this.navigateGoogleAccountFlow(url, userId, teamId);
       } catch(e) {
@@ -1272,14 +1276,25 @@ export class GoogleMeetBot extends MeetBotBase {
 
           const detectMeetingIsOnAValidPage = () => {
             // Simple check to verify we're still on a supported Google Meet page
+            let nonMeetPageCount = 0;
+
             const isOnValidGoogleMeetPage = () => {
               try {
                 // Check if we're still on a Google Meet URL
                 const currentUrl = window.location.href;
                 if (!currentUrl.includes('meet.google.com')) {
+                  nonMeetPageCount++;
+                  // Give account chooser redirects a grace period (3 checks = 30s) for recovery
+                  if (currentUrl.includes('accounts.google.com') && nonMeetPageCount <= 3) {
+                    console.warn(`Account chooser redirect during recording (attempt ${nonMeetPageCount}/3) — waiting for recovery`);
+                    return true;
+                  }
                   console.warn('No longer on Google Meet page - URL changed to:', currentUrl);
                   return false;
                 }
+
+                // Reset counter when we're back on Meet
+                nonMeetPageCount = 0;
 
                 const currentBodyText = document.body.innerText;
                 if (currentBodyText.includes('You\'ve been removed from the meeting')) {
@@ -1565,10 +1580,25 @@ export class GoogleMeetBot extends MeetBotBase {
     );
   
     this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
+
+    // Monitor for account chooser redirects during recording and recover
+    const recordingRedirectMonitor = setInterval(async () => {
+      try {
+        const currentUrl = this.page.url();
+        if (!currentUrl.startsWith('https://meet.google.com') && (currentUrl.includes('accounts.google.com') || currentUrl.includes('myaccount.google.com'))) {
+          this._logger.warn('Account chooser redirect during recording — attempting recovery', { currentUrl: currentUrl.slice(0, 120), userId, teamId });
+          await this.navigateGoogleAccountFlow(this._meetUrl, userId, teamId);
+        }
+      } catch(e) {
+        // Page may be closed — ignore
+      }
+    }, 5000);
+
     const processingTime = 0.2 * 60 * 1000;
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
 
     waitingPromise.promise.then(async () => {
+      clearInterval(recordingRedirectMonitor);
       // Stop PulseAudio recorder and get the audio file path
       let capturedAudioPath: string | null = null;
       if (pulseAudioRecorder) {
