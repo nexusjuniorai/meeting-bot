@@ -87,8 +87,8 @@ export class GoogleMeetBot extends MeetBotBase {
         teamId,
       });
 
-      // If we're back on Meet, we're done
-      if (pageUrl.includes('meet.google.com')) {
+      // If we're back on Meet, we're done (use startsWith to avoid matching continue= query param)
+      if (pageUrl.startsWith('https://meet.google.com')) {
         this._logger.info('Back on Google Meet after account flow', { userId, teamId });
         return;
       }
@@ -140,7 +140,7 @@ export class GoogleMeetBot extends MeetBotBase {
     }
 
     // If we exhausted steps and still aren't on Meet, navigate directly
-    if (!this.page.url().includes('meet.google.com')) {
+    if (!this.page.url().startsWith('https://meet.google.com')) {
       this._logger.warn('Account flow exhausted — navigating directly to meeting URL', { userId, teamId });
       await this.page.goto(meetUrl, { waitUntil: 'domcontentloaded' });
       await this.page.waitForTimeout(3000);
@@ -201,7 +201,7 @@ export class GoogleMeetBot extends MeetBotBase {
           return result;
         };
         const pageUrl = await this.page.url();
-        if (!pageUrl.includes('meet.google.com')) {
+        if (!pageUrl.startsWith('https://meet.google.com')) {
           const signInPage = await detectSignInPage();
           return signInPage ? 'SIGN_IN_PAGE' : 'UNSUPPORTED_PAGE';
         }
@@ -292,7 +292,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
         // --- Handle pre-join loading state ---
         if (
-          currentUrl.includes('meet.google.com') &&
+          currentUrl.startsWith('https://meet.google.com') &&
           (bodyText.includes('Getting ready...') || bodyText.includes("You'll be able to join in just a moment"))
         ) {
           this._logger.info('Pre-join page is still loading — will retry', { userId, teamId });

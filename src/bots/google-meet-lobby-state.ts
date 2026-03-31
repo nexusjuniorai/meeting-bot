@@ -27,7 +27,7 @@ export const detectGoogleMeetLobbyPageState = (
   constants: GoogleMeetLobbyConstants,
 ): GoogleMeetLobbyPageState => {
   const bodyText = snapshot.bodyText || '';
-  const isGoogleMeetPage = snapshot.pageUrl.includes('meet.google.com');
+  const isGoogleMeetPage = snapshot.pageUrl.startsWith('https://meet.google.com');
 
   if (snapshot.pageUrl.includes('accounts.google.com') || bodyText.includes('Choose an account')) {
     return 'ACCOUNT_CHOOSER';
