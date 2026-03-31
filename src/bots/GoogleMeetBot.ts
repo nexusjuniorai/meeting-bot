@@ -69,6 +69,84 @@ export class GoogleMeetBot extends MeetBotBase {
     }
   }
 
+  /**
+   * Navigate through the Google account chooser and any intermediate consent/confirmation
+   * pages until the browser is back on meet.google.com.
+   * Handles: account selection → "OK"/"Allow"/"Continue" interstitials → redirect back.
+   */
+  private async navigateGoogleAccountFlow(meetUrl: string, userId?: string, teamId?: string): Promise<void> {
+    const maxSteps = 6;
+    for (let step = 0; step < maxSteps; step++) {
+      const pageUrl = this.page.url();
+      const pageBody = await this.page.evaluate(() => document.body.innerText || '');
+
+      this._logger.info(`Account flow step ${step + 1}/${maxSteps}`, {
+        pageUrl: pageUrl.slice(0, 120),
+        bodySnippet: pageBody.slice(0, 300),
+        userId,
+        teamId,
+      });
+
+      // If we're back on Meet, we're done
+      if (pageUrl.includes('meet.google.com')) {
+        this._logger.info('Back on Google Meet after account flow', { userId, teamId });
+        return;
+      }
+
+      // Account chooser — select the first account
+      if (pageBody.includes('Choose an account') || pageBody.includes('Use another account')) {
+        const accountLinks = await this.page.locator('a[data-email], div[data-email]').all();
+        if (accountLinks.length > 0) {
+          await accountLinks[0].click({ timeout: 5000 });
+          this._logger.info('Clicked account in chooser', { userId, teamId });
+          await this.page.waitForTimeout(3000);
+          continue;
+        }
+        // Fallback: click the first listed item
+        const firstAccount = this.page.locator('li').first();
+        if (await firstAccount.count() > 0) {
+          await firstAccount.click({ timeout: 5000 });
+          this._logger.info('Clicked first list item in account chooser (fallback)', { userId, teamId });
+          await this.page.waitForTimeout(3000);
+          continue;
+        }
+      }
+
+      // Consent / confirmation interstitials — click through common buttons
+      const consentTexts = ['Continue', 'Allow', 'OK', 'Accept', 'Confirm', 'Next', 'I agree'];
+      let clickedConsent = false;
+      for (const text of consentTexts) {
+        try {
+          const btn = this.page.locator('button, input[type="submit"], input[type="button"]', { hasText: new RegExp(`^${text}$`, 'i') }).first();
+          if (await btn.count() > 0 && await btn.isVisible()) {
+            await btn.click({ timeout: 5000 });
+            this._logger.info(`Clicked "${text}" in account flow interstitial`, { userId, teamId });
+            clickedConsent = true;
+            await this.page.waitForTimeout(3000);
+            break;
+          }
+        } catch { /* button not clickable — try next */ }
+      }
+      if (clickedConsent) continue;
+
+      // Nothing we recognized — wait a moment and check again (redirect may be in progress)
+      this._logger.warn('Account flow — unrecognized page, waiting for redirect', {
+        pageUrl: pageUrl.slice(0, 120),
+        bodySnippet: pageBody.slice(0, 300),
+        userId,
+        teamId,
+      });
+      await this.page.waitForTimeout(3000);
+    }
+
+    // If we exhausted steps and still aren't on Meet, navigate directly
+    if (!this.page.url().includes('meet.google.com')) {
+      this._logger.warn('Account flow exhausted — navigating directly to meeting URL', { userId, teamId });
+      await this.page.goto(meetUrl, { waitUntil: 'domcontentloaded' });
+      await this.page.waitForTimeout(3000);
+    }
+  }
+
   private async joinMeeting({ url, name, teamId, userId, eventId, botId, pushState, uploader }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     this._logger.info('Launching browser...');
 
@@ -197,7 +275,31 @@ export class GoogleMeetBot extends MeetBotBase {
     await retryActionWithWait(
       'Clicking the "Ask to join" button',
       async () => {
-        // Using the Order of most probable detection
+        // --- Handle account chooser redirect before looking for the join button ---
+        const currentUrl = this.page.url();
+        const bodyText = await this.page.evaluate(() => document.body.innerText || '');
+
+        if (currentUrl.includes('accounts.google.com') || bodyText.includes('Choose an account')) {
+          this._logger.warn('Account chooser detected before join click — navigating through Google account flow', { userId, teamId });
+          try {
+            await this.navigateGoogleAccountFlow(url, userId, teamId);
+          } catch(e) {
+            this._logger.warn('Failed to recover from account chooser before join click', { error: e, userId, teamId });
+          }
+          // Throw to retry — page should now be back on Meet with the join button
+          throw new Error('Recovered from account chooser — retrying join click');
+        }
+
+        // --- Handle pre-join loading state ---
+        if (
+          currentUrl.includes('meet.google.com') &&
+          (bodyText.includes('Getting ready...') || bodyText.includes("You'll be able to join in just a moment"))
+        ) {
+          this._logger.info('Pre-join page is still loading — will retry', { userId, teamId });
+          throw new Error('Pre-join page still loading');
+        }
+
+        // --- Try to click the join button ---
         const possibleTexts = [
           'Ask to join',
           'Join now',
@@ -220,14 +322,20 @@ export class GoogleMeetBot extends MeetBotBase {
           }
         }
 
-        // Throws to initiate retries
+        // Log diagnostics before throwing so we can debug without screenshots
         if (!buttonClicked) {
+          this._logger.warn('Join button not found — page diagnostics', {
+            pageUrl: this.page.url(),
+            bodyTextSnippet: bodyText.slice(0, 500),
+            userId,
+            teamId,
+          });
           throw new Error('Unable to complete the join action...');
         }
       },
       this._logger,
-      3,
-      15000,
+      5,
+      10000,
       async () => {
         await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'ask-to-join-button-click', userId, this._logger, botId);
       }
@@ -281,24 +389,11 @@ export class GoogleMeetBot extends MeetBotBase {
             this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
 
             if (pageState === 'ACCOUNT_CHOOSER') {
-              // Bot was redirected to Google account chooser — click the bot account and navigate back
-              this._logger.warn('Bot redirected to Google account chooser — selecting account and returning to meeting', { userId, teamId });
+              this._logger.warn('Bot redirected to Google account chooser during lobby — navigating through Google account flow', { userId, teamId });
               try {
-                const accountLinks = await this.page.locator('a[data-email], div[data-email]').all();
-                if (accountLinks.length > 0) {
-                  await accountLinks[0].click({ timeout: 5000 });
-                } else {
-                  // Fallback: click the first listed account element
-                  const firstAccount = this.page.locator('li').first();
-                  if (await firstAccount.count() > 0) await firstAccount.click({ timeout: 5000 });
-                }
-                // Navigate back to the meeting after account selection
-                await this.page.waitForTimeout(2000);
-                if (!this.page.url().includes('meet.google.com')) {
-                  await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-                }
+                await this.navigateGoogleAccountFlow(url, userId, teamId);
               } catch(e) {
-                this._logger.warn('Failed to recover from account chooser', { error: e, userId, teamId });
+                this._logger.warn('Failed to recover from account chooser during lobby', { error: e, userId, teamId });
               }
             } else if (pageState === 'PREJOIN_LOADING') {
               // Signed-in Meet prejoin is still rendering — keep polling
