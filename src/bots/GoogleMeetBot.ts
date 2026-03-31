@@ -93,6 +93,15 @@ export class GoogleMeetBot extends MeetBotBase {
         return;
       }
 
+      // Login succeeded but Google lost the continue redirect (e.g. myaccount.google.com)
+      // — navigate directly to the meeting
+      if (!pageUrl.includes('accounts.google.com') && !pageUrl.includes('meet.google.com')) {
+        this._logger.info('Login succeeded but landed on wrong page — navigating to meeting URL', { pageUrl: pageUrl.slice(0, 120), userId, teamId });
+        await this.page.goto(meetUrl, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForTimeout(3000);
+        continue;
+      }
+
       // Account chooser — select the first account
       if (pageBody.includes('Choose an account') || pageBody.includes('Use another account')) {
         const accountLinks = await this.page.locator('a[data-email], div[data-email]').all();
