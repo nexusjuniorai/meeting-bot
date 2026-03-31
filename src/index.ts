@@ -6,7 +6,7 @@ import { globalJobStore } from './lib/globalJobStore';
 import messageBroker from './connect/messageBroker';
 import config from './config';
 
-const port = 3000;
+const port = config.port;
 
 // Create Express server
 const server = http.createServer(app);

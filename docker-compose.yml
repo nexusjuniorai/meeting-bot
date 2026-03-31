@@ -1,21 +1,20 @@
 services:
   meeting-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.development
+    image: tonymc016/meeting-bot-aheadx:0.1.62
+    pull_policy: always
     env_file:
       - .env
     environment:
-      - NODE_ENV=development
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROME_PATH=/usr/bin/google-chrome
     ports:
-      - "3000:3000"
-    volumes:
-      - .:/usr/src/app
-      - ./assets/screenshots:/usr/src/app/assets/screenshots
-      - ./debug-videos:/usr/src/app/debug-videos
-      - /usr/src/app/node_modules  # Persist node_modules
-    command: ["/bin/bash", "./start.sh"]
+      - "3010:3000"
+    shm_size: '1gb'
+    depends_on:
+      - redis
 
-
-volumes:
-  cache:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
