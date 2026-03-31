@@ -249,13 +249,13 @@ export class GoogleMeetBot extends MeetBotBase {
         waitInterval = setInterval(async () => {
           try {
             // Always check page state via evaluate — fast, non-blocking, no selector timeouts
-            const pageState = await this.page.evaluate((constants) => {
+            const { pageState, bodyText: pageBodyText } = await this.page.evaluate((constants) => {
               const bodyText = document.body.innerText || '';
 
               // Check lobby/waiting states
-              if (bodyText.includes(constants.lobbyWaitText)) return 'WAITING_FOR_HOST_TO_ADMIT_BOT';
-              if (bodyText.includes(constants.requestTimeout)) return 'WAITING_REQUEST_TIMEOUT';
-              if (bodyText.includes(constants.requestDenied)) return 'DENIED';
+              if (bodyText.includes(constants.lobbyWaitText)) return { pageState: 'WAITING_FOR_HOST_TO_ADMIT_BOT', bodyText };
+              if (bodyText.includes(constants.requestTimeout)) return { pageState: 'WAITING_REQUEST_TIMEOUT', bodyText };
+              if (bodyText.includes(constants.requestDenied)) return { pageState: 'DENIED', bodyText };
 
               // Check if we're in the call: look for Leave call button (multiple aria-label variants)
               const leaveBtn = document.querySelector(
@@ -264,26 +264,30 @@ export class GoogleMeetBot extends MeetBotBase {
               if (leaveBtn) {
                 // Still in lobby if lobby text is visible
                 if (bodyText.includes('Asking to join') || bodyText.includes('Please wait')) {
-                  return 'WAITING_FOR_HOST_TO_ADMIT_BOT';
+                  return { pageState: 'WAITING_FOR_HOST_TO_ADMIT_BOT', bodyText };
                 }
-                return 'IN_CALL';
+                return { pageState: 'IN_CALL', bodyText };
               }
 
               // Check People button with participant count as secondary in-call signal
               const peopleBtn = document.querySelector('button[aria-label^="People"]');
               if (peopleBtn) {
                 const label = peopleBtn.getAttribute('aria-label') || '';
-                if (/People.*?\d+/.test(label)) return 'IN_CALL';
+                if (/People.*?\d+/.test(label)) return { pageState: 'IN_CALL', bodyText };
               }
 
-              return 'UNKNOWN';
+              return { pageState: 'UNKNOWN', bodyText };
             }, {
               lobbyWaitText: GOOGLE_LOBBY_MODE_HOST_TEXT,
               requestTimeout: GOOGLE_REQUEST_TIMEOUT,
               requestDenied: GOOGLE_REQUEST_DENIED,
             });
 
-            this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
+            if (pageState === 'UNKNOWN') {
+              this._logger.info('Lobby polling — page state UNKNOWN, body text snapshot', { bodyText: pageBodyText?.slice(0, 500), userId, teamId });
+            } else {
+              this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
+            }
 
             if (pageState === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
               // Still waiting — do nothing, keep polling
