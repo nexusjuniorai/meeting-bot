@@ -15,6 +15,7 @@ import createBrowserContext from '../lib/chromium';
 import { GOOGLE_LOBBY_MODE_HOST_TEXT, GOOGLE_REQUEST_DENIED, GOOGLE_REQUEST_TIMEOUT } from '../constants';
 import { vp9MimeType, webmMimeType } from '../lib/recording';
 import { PulseAudioRecorder } from '../lib/pulseAudioRecorder';
+import { detectGoogleMeetLobbyPageState } from './google-meet-lobby-state';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -249,45 +250,33 @@ export class GoogleMeetBot extends MeetBotBase {
         waitInterval = setInterval(async () => {
           try {
             // Always check page state via evaluate — fast, non-blocking, no selector timeouts
-            const { pageState, bodyText: pageBodyText } = await this.page.evaluate((constants) => {
+            const pageSnapshot = await this.page.evaluate(() => {
               const bodyText = document.body.innerText || '';
               const pageUrl = window.location.href;
-
-              // Google account chooser — bot got redirected away from Meet
-              if (pageUrl.includes('accounts.google.com') || bodyText.includes('Choose an account')) {
-                return { pageState: 'ACCOUNT_CHOOSER', bodyText };
-              }
-
-              // Check lobby/waiting states
-              if (bodyText.includes(constants.lobbyWaitText)) return { pageState: 'WAITING_FOR_HOST_TO_ADMIT_BOT', bodyText };
-              if (bodyText.includes(constants.requestTimeout)) return { pageState: 'WAITING_REQUEST_TIMEOUT', bodyText };
-              if (bodyText.includes(constants.requestDenied)) return { pageState: 'DENIED', bodyText };
-
-              // Check if we're in the call: look for Leave call button (multiple aria-label variants)
               const leaveBtn = document.querySelector(
                 'button[aria-label="Leave call"], button[aria-label="Leave"], button[aria-label="End call"]'
               );
-              if (leaveBtn) {
-                // Still in lobby if lobby text is visible
-                if (bodyText.includes('Asking to join') || bodyText.includes('Please wait')) {
-                  return { pageState: 'WAITING_FOR_HOST_TO_ADMIT_BOT', bodyText };
-                }
-                return { pageState: 'IN_CALL', bodyText };
-              }
-
-              // Check People button with participant count as secondary in-call signal
               const peopleBtn = document.querySelector('button[aria-label^="People"]');
-              if (peopleBtn) {
-                const label = peopleBtn.getAttribute('aria-label') || '';
-                if (/People.*?\d+/.test(label)) return { pageState: 'IN_CALL', bodyText };
-              }
+              const hasJoinActionButton = Array.from(document.querySelectorAll('button')).some((button) => {
+                const label = ((button.textContent || button.getAttribute('aria-label') || '') as string).trim();
+                return /^(Ask to join|Join now|Join anyway)$/i.test(label);
+              });
 
-              return { pageState: 'UNKNOWN', bodyText };
-            }, {
+              return {
+                bodyText,
+                pageUrl,
+                hasLeaveButton: Boolean(leaveBtn),
+                peopleButtonLabel: peopleBtn?.getAttribute('aria-label') || '',
+                hasJoinActionButton,
+              };
+            });
+
+            const pageState = detectGoogleMeetLobbyPageState(pageSnapshot, {
               lobbyWaitText: GOOGLE_LOBBY_MODE_HOST_TEXT,
               requestTimeout: GOOGLE_REQUEST_TIMEOUT,
               requestDenied: GOOGLE_REQUEST_DENIED,
             });
+            const pageBodyText = pageSnapshot.bodyText;
 
             this._logger.info('Lobby polling — page state', { pageState, userId, teamId });
 
@@ -310,6 +299,36 @@ export class GoogleMeetBot extends MeetBotBase {
                 }
               } catch(e) {
                 this._logger.warn('Failed to recover from account chooser', { error: e, userId, teamId });
+              }
+            } else if (pageState === 'PREJOIN_LOADING') {
+              // Signed-in Meet prejoin is still rendering — keep polling
+            } else if (pageState === 'JOIN_ACTION_REQUIRED') {
+              this._logger.info('Lobby polling — prejoin page requires another join action', { userId, teamId });
+
+              const possibleTexts = [
+                'Ask to join',
+                'Join now',
+                'Join anyway',
+              ];
+
+              let buttonClicked = false;
+
+              for (const text of possibleTexts) {
+                try {
+                  const button = this.page.locator('button', { hasText: new RegExp(text, 'i') }).first();
+                  if (await button.count() > 0) {
+                    await button.click({ timeout: 5000 });
+                    buttonClicked = true;
+                    this._logger.info(`Lobby polling — clicked "${text}" action...`, { userId, teamId });
+                    break;
+                  }
+                } catch(err) {
+                  this._logger.warn(`Lobby polling — unable to click using "${text}" action...`, { userId, teamId });
+                }
+              }
+
+              if (!buttonClicked) {
+                this._logger.warn('Lobby polling — no join action button could be clicked', { userId, teamId });
               }
             } else if (pageState === 'WAITING_FOR_HOST_TO_ADMIT_BOT') {
               // Still waiting — do nothing, keep polling
@@ -1276,7 +1295,6 @@ export class GoogleMeetBot extends MeetBotBase {
           // Participant tracker — polls the People panel for join/leave events
           const startParticipantTracker = () => {
             const knownParticipants = new Set<string>();
-            let trackerInterval: ReturnType<typeof setInterval>;
 
             const pollParticipants = () => {
               try {
@@ -1330,7 +1348,7 @@ export class GoogleMeetBot extends MeetBotBase {
               }
             };
 
-            trackerInterval = setInterval(pollParticipants, 4000);
+            setInterval(pollParticipants, 4000);
             // Initial poll
             pollParticipants();
           };
