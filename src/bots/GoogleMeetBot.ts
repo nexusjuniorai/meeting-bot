@@ -682,6 +682,8 @@ export class GoogleMeetBot extends MeetBotBase {
               channelCount: 2,
               echoCancellation: false,
               noiseSuppression: false,
+              sampleRate: 48000,
+              sampleSize: 16,
             },
             preferCurrentTab: true,
           });
@@ -704,7 +706,7 @@ export class GoogleMeetBot extends MeetBotBase {
             options = { mimeType: secondaryMimeType };
           }
 
-          const mediaRecorder = new MediaRecorder(stream, { ...options });
+          const mediaRecorder = new MediaRecorder(stream, { ...options, audioBitsPerSecond: 128_000 });
 
           mediaRecorder.ondataavailable = async (event: BlobEvent) => {
             if (!event.data.size) {

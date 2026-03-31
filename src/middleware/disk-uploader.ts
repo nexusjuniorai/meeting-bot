@@ -14,6 +14,7 @@ import config from '../config';
 import { getStorageProvider } from '../uploader/providers/factory';
 import { getTimeString } from '../lib/datetime';
 import { notifyRecordingCompleted, RecordingCompletedPayload } from '../services/notificationService';
+import { remuxToMp4 } from '../lib/remux';
 
 console.log(' ----- PWD OR CWD ----- ', process.cwd());
 
@@ -499,7 +500,19 @@ class DiskUploader implements IUploader {
     const provider = getStorageProvider();
     this._logger.info(`Uploading recording to object storage using provider: ${provider.name}...`);
 
-    const filePath = DiskUploader.getFilePath(this._userId, this._tempFileId, this.fileExtension);
+    let filePath = DiskUploader.getFilePath(this._userId, this._tempFileId, this.fileExtension);
+
+    // Remux raw MediaRecorder WebM/MKV → seekable MP4 before upload
+    if (filePath.endsWith('.webm') || filePath.endsWith('.mkv')) {
+      try {
+        filePath = await remuxToMp4(filePath, this._logger);
+        this.fileExtension = '.mp4';
+        this.contentType = extensionToContentType['.mp4'] ?? 'video/mp4';
+      } catch (remuxErr) {
+        this._logger.warn('Remux to MP4 failed, uploading original file', { remuxErr });
+      }
+    }
+
     const chunkSize = this.UPLOAD_CHUNK_SIZE;
 
     // Compose key to preserve existing S3 layout for parity
