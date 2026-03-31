@@ -12,7 +12,6 @@ export interface MeetingJoinParams {
   timezone: string;
   botId?: string;
   eventId?: string;
-  avatarUrl?: string;
   attendees?: Array<{ name: string; email: string }>;
 }
 

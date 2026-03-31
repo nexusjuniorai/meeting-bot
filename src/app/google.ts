@@ -21,7 +21,6 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
     userId,
     eventId,
     botId,
-    avatarUrl,
     attendees,
   }: MeetingJoinParams = req.body;
 
@@ -72,7 +71,7 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
 
       // Create and join the meeting
       const bot = new GoogleMeetBot(logger, correlationId);
-      await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader, avatarUrl });
+      await bot.join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader });
     }, logger);
 
     if (!jobResult.accepted) {

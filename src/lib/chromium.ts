@@ -68,8 +68,6 @@ async function launchBrowserWithTimeout(launchFn: () => Promise<Browser>, timeou
 export interface BrowserContextOptions {
   /** Base64-encoded Playwright storageState JSON */
   storageStateB64?: string;
-  /** URL of an image to display as the bot's camera feed (virtual camera avatar) */
-  avatarUrl?: string;
 }
 
 async function createBrowserContext(url: string, correlationId: string, botType: BotType = 'google', options?: BrowserContextOptions): Promise<Page> {
@@ -176,37 +174,6 @@ async function createBrowserContext(url: string, correlationId: string, botType:
   await context.grantPermissions(['microphone', 'camera'], { origin: url });
 
   const page = await context.newPage();
-
-  // Inject virtual camera: override getUserMedia to return a canvas stream showing the avatar image
-  if (options?.avatarUrl) {
-    const avatarUrl = options.avatarUrl;
-    await page.addInitScript(`
-      (function() {
-        const avatarUrl = ${JSON.stringify(avatarUrl)};
-        const orig = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-        navigator.mediaDevices.getUserMedia = async function(constraints) {
-          if (constraints && constraints.video) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 640;
-            canvas.height = 480;
-            const ctx = canvas.getContext('2d');
-            try {
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              await new Promise(function(res, rej) { img.onload = res; img.onerror = rej; img.src = avatarUrl; });
-              ctx.drawImage(img, 0, 0, 640, 480);
-            } catch(e) {
-              ctx.fillStyle = '#1a73e8';
-              ctx.fillRect(0, 0, 640, 480);
-            }
-            return canvas.captureStream(1);
-          }
-          return orig(constraints);
-        };
-      })();
-    `);
-    console.log(`${getCorrelationIdLog(correlationId)} Injected virtual camera avatar: ${avatarUrl}`);
-  }
 
   // Attach common error handlers
   attachBrowserErrorHandlers(browser, context, page, correlationId);

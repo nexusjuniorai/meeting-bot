@@ -22,7 +22,6 @@ export interface JoinParams {
   botId?: string;
   eventId?: string;
   uploader: IUploader;
-  avatarUrl?: string;
 }
 
 export abstract class AbstractMeetBot {
